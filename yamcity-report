@@ -1,0 +1,135 @@
+#!/bin/bash
+#
+# yamcity-report - summarize failures from the latest yamcity run
+#
+# Usage:
+#   ./yamcity-report                # analyze latest run under ./yamc-logs (or scriptdir/yamc-logs)
+#   ./yamcity-report /path/to/run   # analyze a specific run directory (the one containing summary.log)
+#
+set -e
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+is_dir() { [ -d "$1" ]; }
+is_file() { [ -f "$1" ]; }
+
+pick_logs_root() {
+  if [ -n "${YAMC_LOGS_DIR:-}" ] && is_dir "$YAMC_LOGS_DIR"; then
+    echo "$YAMC_LOGS_DIR"
+    return 0
+  fi
+
+  if is_dir "./yamc-logs"; then
+    echo "./yamc-logs"
+    return 0
+  fi
+
+  local script_dir
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  if is_dir "$script_dir/yamc-logs"; then
+    echo "$script_dir/yamc-logs"
+    return 0
+  fi
+
+  return 1
+}
+
+latest_run_dir() {
+  local logs_root="$1"
+  # The directories are timestamped (YYYYMMDD_HHMMSS); name ordering matches time ordering.
+  local latest
+  latest="$(ls -1 "$logs_root" 2>/dev/null | sort | tail -n 1 || true)"
+  if [ -z "$latest" ]; then
+    return 1
+  fi
+  echo "$logs_root/$latest"
+}
+
+report_summary_failures() {
+  local summary="$1"
+  if ! is_file "$summary"; then
+    return 0
+  fi
+
+  # Print the FAILED COMMANDS section if present.
+  if grep -q "^FAILED COMMANDS" "$summary"; then
+    echo ""
+    echo "=== FAILED COMMANDS (from summary.log) ==="
+    # Print from FAILED COMMANDS to end
+    awk '
+      BEGIN { printing=0 }
+      /^FAILED COMMANDS/ { printing=1 }
+      { if (printing) print }
+    ' "$summary"
+  fi
+}
+
+list_nonempty_errs() {
+  local run_dir="$1"
+
+  # Prefer module-tagged err files if present, else cmd_N.err
+  local -a err_files=()
+  while IFS= read -r f; do err_files+=("$f"); done < <(ls -1 "$run_dir"/cmd_*_*.err 2>/dev/null || true)
+  if [ ${#err_files[@]} -eq 0 ]; then
+    while IFS= read -r f; do err_files+=("$f"); done < <(ls -1 "$run_dir"/cmd_*.err 2>/dev/null || true)
+  fi
+
+  local found_any=false
+  for f in "${err_files[@]}"; do
+    [ -f "$f" ] || continue
+    if [ -s "$f" ]; then
+      if [ "$found_any" = false ]; then
+        echo ""
+        echo "=== STDERR OUTPUT (non-empty cmd_*.err) ==="
+        found_any=true
+      fi
+      echo ""
+      echo "--- $(basename "$f") ---"
+      # Show the full stderr; this is usually small and the user asked for errors.
+      cat "$f"
+    fi
+  done
+
+  if [ "$found_any" = false ]; then
+    echo ""
+    echo "No non-empty cmd_*.err files found."
+  fi
+}
+
+main() {
+  local run_dir=""
+
+  if [ $# -gt 1 ]; then
+    die "Too many arguments. Usage: $0 [run_dir]"
+  fi
+
+  if [ $# -eq 1 ]; then
+    run_dir="$1"
+    is_dir "$run_dir" || die "Run directory not found: $run_dir"
+  else
+    local logs_root
+    logs_root="$(pick_logs_root)" || die "Could not find logs root (set YAMC_LOGS_DIR or run from a directory containing ./yamc-logs)"
+    run_dir="$(latest_run_dir "$logs_root")" || die "No runs found under: $logs_root"
+  fi
+
+  local summary="$run_dir/summary.log"
+  is_file "$summary" || die "summary.log not found in run dir: $run_dir"
+
+  echo "YAMCITY report"
+  echo "Run dir: $run_dir"
+
+  # Print a small header from summary.log
+  echo ""
+  echo "=== RUN INFO (from summary.log) ==="
+  head -n 12 "$summary" || true
+
+  report_summary_failures "$summary"
+  list_nonempty_errs "$run_dir"
+}
+
+main "$@"
+
+
