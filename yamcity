@@ -42,7 +42,7 @@ YAMCITY - YAMC Automation Wrapper
 Usage: yamcity -h hostname [-u username] [-v] profile_file [continue_on_error]
 
 Options:
-  -h hostname       Required. Target remote hostname to use for all commands
+  -h hostname       Optional if YAMC_HOST is set. Target remote hostname to use for all commands
   -u username       Optional. Default SSH username (can be overridden per-line)
   -v                Optional. Enable verbose output
 
@@ -145,6 +145,12 @@ extract_and_reorder() {
   EXTRACTED_ARGS="${args[*]}"
 }
 
+sanitize_for_filename() {
+  # Replace path separators/spaces and drop anything too weird for filenames.
+  # Keeps: A-Z a-z 0-9 . _ -
+  echo "$1" | sed -E 's#[/[:space:]]+#_#g; s#[^A-Za-z0-9._-]#_#g; s#_+#_#g'
+}
+
 # Process a single profile file (can be called recursively)
 process_profile() {
   local profile_file="$1"
@@ -241,13 +247,21 @@ process_profile() {
       # Create command-specific log files
       local cmd_log="$LOG_DIR/cmd_${TOTAL_COMMANDS}.log"
       local cmd_err="$LOG_DIR/cmd_${TOTAL_COMMANDS}.err"
+
+      # Add module-named aliases (keep original cmd_N.* for compatibility)
+      local module_name="${EXTRACTED_ARGS%% *}"
+      local module_tag
+      module_tag="$(sanitize_for_filename "$module_name")"
+      local cmd_log_alias="$LOG_DIR/cmd_${TOTAL_COMMANDS}_${module_tag}.log"
+      local cmd_err_alias="$LOG_DIR/cmd_${TOTAL_COMMANDS}_${module_tag}.err"
       
       log "${indent}--------------------------------------------------"
       log "${indent}[$TOTAL_COMMANDS] $YAMC_BIN $full_command"
       
       # Execute the YAMC command
       set +e
-      $YAMC_BIN $full_command > >(tee "$cmd_log") 2> >(tee "$cmd_err" >&2)
+      # IMPORTANT: redirect stdin so the called command cannot consume the profile file
+      $YAMC_BIN $full_command < /dev/null > >(tee "$cmd_log" "$cmd_log_alias") 2> >(tee "$cmd_err" "$cmd_err_alias" >&2)
       local exit_code=$?
       set -e
       
@@ -289,9 +303,14 @@ done
 # Shift past the options
 shift $((OPTIND-1))
 
+# Allow HOST to come from environment if not provided on CLI
+if [ -z "$HOST" ] && [ -n "$YAMC_HOST" ]; then
+  HOST="$YAMC_HOST"
+fi
+
 # Check required parameters
 if [ -z "$HOST" ]; then
-  echo "Error: Remote hostname (-h) is required"
+  echo "Error: Remote hostname is required (use -h or set YAMC_HOST)"
   show_usage
 fi
 
@@ -302,6 +321,13 @@ fi
 
 PROFILE_FILE="$1"
 CONTINUE_ON_ERROR="${2:-false}"
+
+# Normalize: only literal "true" enables continue-on-error
+if [ "$CONTINUE_ON_ERROR" != "true" ]; then
+  CONTINUE_ON_ERROR="false"
+else
+  log "WARNING: continue_on_error=true (will continue running after failures)"
+fi
 
 # Validate initial profile file
 if [ ! -f "$PROFILE_FILE" ]; then
