@@ -1,0 +1,86 @@
+#!/bin/bash
+# dhcp/help.loc - Site-aware help for the dhcp module
+#
+# Reads yamc.local/dhcp/cluster.conf for the server list and prints
+# common workflow commands. Pure local read-only operation.
+
+echo "DHCP module - ISC DHCP server"
+echo ""
+
+if [ -z "$RES_DIR" ] || [ ! -d "$RES_DIR" ]; then
+  echo "  No yamc.local/dhcp/ resources found."
+  echo "  Pass -r <path> or create yamc.local/dhcp/cluster.conf to enable site help."
+  echo ""
+fi
+
+# --- Site facts from cluster.conf ---
+DHCP_SERVERS=""
+if [ -n "$RES_DIR" ] && [ -f "$RES_DIR/cluster.conf" ]; then
+  # Source in a subshell to grab DHCP_SERVERS without polluting our env.
+  DHCP_SERVERS=$(bash -c "set +e; source '$RES_DIR/cluster.conf' 2>/dev/null; printf '%s' \"\$DHCP_SERVERS\"")
+fi
+
+if [ -n "$DHCP_SERVERS" ]; then
+  echo "Servers (cluster.conf):"
+  for s in $DHCP_SERVERS; do
+    echo "  - $s"
+  done
+  echo ""
+fi
+
+# --- Key files in yamc.local/dhcp/ ---
+if [ -n "$RES_DIR" ] && [ -d "$RES_DIR" ]; then
+  echo "Site files ($RES_DIR):"
+  for f in cluster.conf dhcpd.conf hosts.conf README.md; do
+    if [ -f "$RES_DIR/$f" ]; then
+      echo "  - $f"
+    fi
+  done
+  echo ""
+fi
+
+# --- Subcommands (intent, not generic list) ---
+cat <<'EOF'
+Subcommands:
+  setup    Install isc-dhcp-server and deploy configuration
+  deploy   Deploy current dhcpd.conf / hosts.conf (no edit)
+  edit     Edit local config files, then deploy
+  view     View deployed config (read-only)
+  watch    Tail /var/log/syslog for dhcpd activity
+
+EOF
+
+# --- Workflow one-liners using actual servers ---
+echo "Common commands:"
+if [ -n "$DHCP_SERVERS" ]; then
+  first=""
+  for s in $DHCP_SERVERS; do
+    [ -z "$first" ] && first="$s"
+    echo "  yamc -h $s -u root dhcp watch         # tail DHCP log on $s"
+  done
+  if [ -n "$first" ]; then
+    echo "  yamc -h $first -u root dhcp deploy       # deploy to $first only"
+  fi
+else
+  echo "  yamc -h <server> -u root dhcp watch"
+  echo "  yamc -h <server> -u root dhcp deploy"
+fi
+
+# --- Cluster helper scripts (if present in yamc.local/bin/) ---
+if [ -n "$RESOURCES_ROOT" ] && [ -d "$RESOURCES_ROOT/bin" ]; then
+  if [ -x "$RESOURCES_ROOT/bin/dhcp-cluster-edit" ]; then
+    echo "  dhcp-cluster-edit                       # edit + deploy to all DHCP_SERVERS"
+  fi
+  if [ -x "$RESOURCES_ROOT/bin/dhcp-cluster-deploy" ]; then
+    echo "  dhcp-cluster-deploy                     # deploy to all DHCP_SERVERS"
+  fi
+fi
+
+if [ -n "$DHCP_SERVERS" ]; then
+  set -- $DHCP_SERVERS
+  if [ "$#" -gt 1 ]; then
+    echo ""
+    echo "Notes:"
+    echo "  Redundant servers run identical configs; clients use whichever responds first."
+  fi
+fi

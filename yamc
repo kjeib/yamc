@@ -45,11 +45,16 @@ show_usage() {
   cat <<EOF
 Usage: yamc init -h remote_hostname -u username [-v] [-t timeout]
        yamc -h remote_hostname -u username init [-v] [-t timeout]
+       yamc help [module]
        yamc -h remote_hostname [-u username] [-p profile] [-r resources] [-e var=value] [-v] [-t timeout] module [subfunction] [args...]
 
 Commands:
   init            Initialize a host for use with YAMC (required before using other modules)
                   Must be run with a regular unprivileged user that has sudo access
+  help [module]   Show site-aware help. With no module, lists every module that has
+                  yamc.local/<module>/ resources. With a module, runs <module>/help.loc
+                  if present, else prints a generic subcommand listing.
+                  Does not require -h and does not use SSH.
 
 Options:
   -h hostname     Target remote hostname (or set YAMC_HOST environment variable)
@@ -76,6 +81,9 @@ Examples:
   export YAMC_USER=admin
   yamc init                              # Initialize host using environment variables
   yamc -h server1 -u regular_user init   # Command-line args override environment variables
+  yamc help                              # Aggregate help for all modules with yamc.local resources
+  yamc help dhcp                         # Help for the dhcp module
+  yamc dhcp help                         # Same as 'yamc help dhcp'
   yamc -u root timezone America/New_York # Run module as root (after init)
   yamc pref                              # Set user preferences, uses YAMC_HOST and YAMC_USER
   yamc -v test                           # Run test with verbose output, uses environment vars
@@ -259,6 +267,259 @@ EOF
   log INFO "Host $host successfully initialized"
   log INFO "You can now run YAMC modules without going through initialization"
   return 0
+}
+
+#
+# Help / Introspection (hostless, no SSH)
+#
+
+# Resolve the INSTALL_DIR (yamc source/install directory) into the global INSTALL_DIR.
+resolve_install_dir() {
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -L "$script_dir/yamc" ]; then
+    INSTALL_DIR="$(readlink "$script_dir/yamc" | xargs dirname)"
+  else
+    INSTALL_DIR="$script_dir"
+  fi
+}
+
+# Resolve RESOURCES_ROOT (yamc.local) using -r, YAMC_RESOURCES, or sibling dir.
+# Sets the global RESOURCES_ROOT (may remain empty if none found).
+resolve_resources_root() {
+  RESOURCES_ROOT=""
+  if [ -n "$RESOURCES_PATH" ]; then
+    if [ -d "$RESOURCES_PATH" ]; then
+      RESOURCES_ROOT="$RESOURCES_PATH"
+    fi
+  else
+    local yamc_local_path
+    yamc_local_path="$(dirname "$INSTALL_DIR")/yamc.local"
+    if [ -d "$yamc_local_path" ]; then
+      RESOURCES_ROOT="$yamc_local_path"
+    fi
+  fi
+}
+
+# Locate a module directory. Echoes path on stdout; returns non-zero if not found.
+# A directory is treated as a module if it has setup, setup.loc, help, or help.loc.
+find_module_dir() {
+  local module="$1"
+  local paths=(
+    "$module"
+    "$HOME/.yamc/modules/$module"
+    "/etc/yamc/modules/$module"
+    "$INSTALL_DIR/modules/$module"
+    "$INSTALL_DIR/$module"
+  )
+  local p
+  for p in "${paths[@]}"; do
+    if [ -d "$p" ] && \
+       ( [ -f "$p/setup" ] || [ -f "$p/setup.loc" ] || \
+         [ -f "$p/help" ]  || [ -f "$p/help.loc" ] ); then
+      echo "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# List subfunctions for a module by scanning for scripts and *.loc files.
+# Prints one subfunction name per line, sorted.
+list_subfunctions() {
+  local mod_dir="$1"
+  local f name base
+  local seen=""
+  local entries=""
+  for f in "$mod_dir"/*; do
+    [ -f "$f" ] || continue
+    name="$(basename "$f")"
+    case "$name" in
+      *.md|*.env|README*|tmp-*|*.bak) continue ;;
+      *.conf|*.json|*.yaml|*.yml|*.list|*.ppd|*.txt) continue ;;
+    esac
+    if [[ "$name" == *.loc ]]; then
+      base="${name%.loc}"
+    elif [ -x "$f" ]; then
+      base="$name"
+    else
+      continue
+    fi
+    case " $seen " in
+      *" $base "*) ;;
+      *) seen="$seen $base"; entries="$entries$base"$'\n' ;;
+    esac
+  done
+  if [ -n "$entries" ]; then
+    printf '%s' "$entries" | sort
+  fi
+}
+
+# Resolve module-specific RES_DIR / RES_BASE for the help context (no profile mounting).
+# Sets globals RES_DIR_HELP and RES_BASE_HELP.
+resolve_module_resources() {
+  local module="$1"
+  RES_DIR_HELP=""
+  RES_BASE_HELP=""
+  if [ -z "$RESOURCES_ROOT" ]; then
+    return 0
+  fi
+  if [ -d "$RESOURCES_ROOT/$module" ]; then
+    RES_BASE_HELP="$RESOURCES_ROOT/$module"
+  fi
+  if [ -n "$PROFILE" ] && [ -d "$RESOURCES_ROOT/${module}.${PROFILE}" ]; then
+    RES_DIR_HELP="$RESOURCES_ROOT/${module}.${PROFILE}"
+  else
+    RES_DIR_HELP="$RES_BASE_HELP"
+  fi
+  if [ -z "$RES_BASE_HELP" ] && [ -n "$RES_DIR_HELP" ]; then
+    RES_BASE_HELP="$RES_DIR_HELP"
+  fi
+}
+
+# Print generic fallback help for a module that has no help.loc.
+print_module_help_fallback() {
+  local module="$1"
+  local mod_dir="$2"
+  local res_dir="$3"
+
+  echo "Module: $module"
+  echo "  Path:      $mod_dir"
+  if [ -n "$res_dir" ]; then
+    echo "  Resources: $res_dir"
+  else
+    echo "  Resources: (none under yamc.local/)"
+  fi
+  if [ -f "$mod_dir/README.md" ]; then
+    echo "  Docs:      $mod_dir/README.md"
+  fi
+
+  local subs
+  subs="$(list_subfunctions "$mod_dir")"
+  if [ -n "$subs" ]; then
+    echo "  Subcommands:"
+    local s
+    while IFS= read -r s; do
+      [ -z "$s" ] && continue
+      echo "    $s"
+    done <<< "$subs"
+  fi
+
+  echo ""
+  echo "  Usage: yamc -h <host> [-u <user>] $module [subcommand]"
+  echo "  (No help.loc defined. Create $mod_dir/help.loc for module-specific help.)"
+}
+
+# Run help for a single module.
+run_module_help() {
+  local module="$1"
+
+  local mod_dir
+  if ! mod_dir="$(find_module_dir "$module")"; then
+    log ERROR "Module '$module' not found"
+    log ERROR "Searched in:"
+    log ERROR "  - $module (absolute path)"
+    log ERROR "  - $HOME/.yamc/modules/$module"
+    log ERROR "  - /etc/yamc/modules/$module"
+    log ERROR "  - $INSTALL_DIR/modules/$module"
+    log ERROR "  - $INSTALL_DIR/$module"
+    return 1
+  fi
+
+  resolve_module_resources "$module"
+
+  if [ -f "$mod_dir/help.loc" ]; then
+    # help.loc is sourced in a subshell so it cannot pollute our env.
+    # Guard set -e so a help.loc returning non-zero does not kill yamc.
+    set +e
+    (
+      export MOD_DIR="$mod_dir"
+      export RES_DIR="$RES_DIR_HELP"
+      export RES_BASE="$RES_BASE_HELP"
+      export YAMC_MODULE="$module"
+      export INSTALL_DIR
+      export RESOURCES_ROOT
+      # shellcheck disable=SC1090
+      source "$mod_dir/help.loc"
+    )
+    local rc=$?
+    set -e
+    return $rc
+  fi
+
+  print_module_help_fallback "$module" "$mod_dir" "$RES_DIR_HELP"
+  return 0
+}
+
+# Run aggregate help: every module that has yamc.local/<module>/ resources
+# and a matching installed module.
+run_aggregate_help() {
+  if [ -z "$RESOURCES_ROOT" ]; then
+    echo "No yamc.local resources directory found."
+    echo "Use 'yamc help <module>' to see help for a specific module,"
+    echo "or pass -r <path> to point at a resources directory."
+    return 0
+  fi
+
+  echo "YAMC resources root: $RESOURCES_ROOT"
+  echo ""
+
+  # Collect candidate module names from yamc.local/* (strip .profile suffix).
+  local d name base modules=""
+  for d in "$RESOURCES_ROOT"/*/; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    base="${name%%.*}"
+    if find_module_dir "$base" >/dev/null 2>&1; then
+      case " $modules " in
+        *" $base "*) ;;
+        *) modules="$modules $base" ;;
+      esac
+    fi
+  done
+
+  modules="$(echo "$modules" | tr ' ' '\n' | sort -u | grep -v '^$' || true)"
+
+  if [ -z "$modules" ]; then
+    echo "No modules found with both yamc.local/<module>/ and an installed module."
+    return 0
+  fi
+
+  local m first=true
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    if [ "$first" = true ]; then
+      first=false
+    else
+      echo ""
+    fi
+    echo "=== $m ==="
+    run_module_help "$m" || true
+  done <<< "$modules"
+}
+
+# Parse the 'help' subcommand args (options + optional module name).
+parse_help_command() {
+  local OPTIND=1
+  while getopts "p:r:v" opt "$@"; do
+    case $opt in
+      p) PROFILE="$OPTARG" ;;
+      r) RESOURCES_PATH="$OPTARG" ;;
+      v) VERBOSE=true ;;
+      *) : ;;
+    esac
+  done
+  shift $((OPTIND-1))
+
+  resolve_install_dir
+  resolve_resources_root
+
+  if [ $# -eq 0 ]; then
+    run_aggregate_help
+  else
+    run_module_help "$1"
+  fi
+  exit $?
 }
 
 #
@@ -920,14 +1181,17 @@ SSH_TIMEOUT="$DEFAULT_SSH_TIMEOUT"
 INIT_MODE=false
 CLI_SSH_USER_SPECIFIED=false
 
-# Look for "init" as first non-option argument
-# First, check if the very first argument is "init"
+# Look for "init" or "help" as first non-option argument.
+# These dispatch paths do not require -h and do not use SSH.
 if [ "$1" = "init" ]; then
   INIT_MODE=true
   shift
   parse_init_command "$@"
+elif [ "$1" = "help" ]; then
+  shift
+  parse_help_command "$@"
 else
-  # Process the options first, then look for init
+  # Process the options first, then look for init/help
   # Save original args for later
   original_args=("$@")
   
@@ -948,12 +1212,21 @@ else
   # Shift to the first non-option argument
   shift $((OPTIND-1))
   
-  # Now check if the first non-option argument is "init"
+  # Now check if the first non-option argument is "init" or "help"
   if [ "$1" = "init" ]; then
     INIT_MODE=true
     shift
     # Pass all remaining arguments to the init parser
     parse_init_command "-h" "$HOST" "-u" "$SSH_USER" "$@"
+  elif [ "$1" = "help" ]; then
+    shift
+    parse_help_command "$@"
+  elif [ -n "$1" ] && [ "$2" = "help" ]; then
+    # Symmetry: 'yamc <module> help' == 'yamc help <module>'
+    resolve_install_dir
+    resolve_resources_root
+    run_module_help "$1"
+    exit $?
   else
     # Regular command parsing (non-init mode)
     parse_module_command "${original_args[@]}"

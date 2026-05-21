@@ -1,0 +1,92 @@
+#!/bin/bash
+# bind9/help.loc - Site-aware help for the bind9 module
+#
+# Reads yamc.local/bind9/cluster.conf for the DNS server list, lists configured
+# zones, and prints common workflow commands. Pure local read-only operation.
+
+echo "bind9 module - BIND9 DNS server"
+echo ""
+
+if [ -z "$RES_DIR" ] || [ ! -d "$RES_DIR" ]; then
+  echo "  No yamc.local/bind9/ resources found."
+  echo "  Pass -r <path> or create yamc.local/bind9/cluster.conf to enable site help."
+  echo ""
+fi
+
+# --- Site facts from cluster.conf ---
+DNS_SERVERS=""
+if [ -n "$RES_DIR" ] && [ -f "$RES_DIR/cluster.conf" ]; then
+  DNS_SERVERS=$(bash -c "set +e; source '$RES_DIR/cluster.conf' 2>/dev/null; printf '%s' \"\$DNS_SERVERS\"")
+fi
+
+if [ -n "$DNS_SERVERS" ]; then
+  echo "Servers (cluster.conf):"
+  for s in $DNS_SERVERS; do
+    echo "  - $s"
+  done
+  echo ""
+fi
+
+# --- Key files in yamc.local/bind9/ ---
+if [ -n "$RES_DIR" ] && [ -d "$RES_DIR" ]; then
+  echo "Site files ($RES_DIR):"
+  for f in cluster.conf named.conf named.local README.md; do
+    if [ -f "$RES_DIR/$f" ]; then
+      echo "  - $f"
+    fi
+  done
+
+  if [ -d "$RES_DIR/zones" ]; then
+    echo "  - zones/"
+    # List zone files (skip backups)
+    for z in "$RES_DIR/zones"/*; do
+      [ -f "$z" ] || continue
+      name="$(basename "$z")"
+      case "$name" in
+        *.bak|*~) continue ;;
+      esac
+      echo "      $name"
+    done
+  fi
+  echo ""
+fi
+
+# --- Subcommands ---
+cat <<'EOF'
+Subcommands:
+  setup    Install bind9 and deploy named.conf + zones
+  deploy   Deploy current named.conf / named.local / zones (no edit)
+  edit     Edit zone files locally, then deploy
+  view     View deployed configuration (read-only)
+  watch    Tail bind9 logs
+
+EOF
+
+# --- Workflow one-liners using actual servers ---
+echo "Common commands:"
+if [ -n "$DNS_SERVERS" ]; then
+  first=""
+  for s in $DNS_SERVERS; do
+    [ -z "$first" ] && first="$s"
+    echo "  yamc -h $s -u root bind9 watch        # tail bind9 log on $s"
+  done
+  if [ -n "$first" ]; then
+    echo "  yamc -h $first -u root bind9 deploy      # deploy to $first only"
+  fi
+else
+  echo "  yamc -h <server> -u root bind9 watch"
+  echo "  yamc -h <server> -u root bind9 deploy"
+fi
+
+# --- Cluster helper scripts (if present in yamc.local/bin/) ---
+if [ -n "$RESOURCES_ROOT" ] && [ -d "$RESOURCES_ROOT/bin" ]; then
+  if [ -x "$RESOURCES_ROOT/bin/bind9-cluster-edit" ]; then
+    echo "  bind9-cluster-edit                      # edit + deploy to all DNS_SERVERS"
+  fi
+  if [ -x "$RESOURCES_ROOT/bin/bind9-cluster-deploy" ]; then
+    echo "  bind9-cluster-deploy                    # deploy to all DNS_SERVERS"
+  fi
+fi
+
+echo ""
+echo "Reminder: increment zone serial (YYYYMMDDNN) before deploy."

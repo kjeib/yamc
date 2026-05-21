@@ -133,6 +133,31 @@ When a subfunction is specified, YAMC will look for and execute scripts named af
 
 Environment variables created in the `.loc` scripts will be available to the remote scripts.
 
+### Module Help (`help` / `help.loc`)
+
+Every module can ship a `help.loc` script that prints site-aware usage. It runs locally — there is no SSH, no `-h` flag is required, and it has read-only access to the module's `yamc.local/<module>/` resources via `RES_DIR`.
+
+```bash
+yamc help              # aggregate over yamc.local/<module>/ with installed modules
+yamc help dhcp         # one module
+yamc dhcp help         # symmetric form, identical to 'yamc help dhcp'
+```
+
+If `<module>/help.loc` is missing, YAMC prints a generic fallback (paths, README pointer, discovered subcommand names).
+
+**`help.loc` contract:**
+
+- **Local only.** Sourced in a subshell; treat it as read-only. Do not modify the system.
+- **Inputs:** `MOD_DIR`, `RES_DIR`, `RES_BASE`, `YAMC_MODULE`, `INSTALL_DIR`, `RESOURCES_ROOT`.
+- **Output:** human-readable text on stdout. Keep it short and actionable:
+  - Site facts (e.g., server names from `cluster.conf`)
+  - One-line subcommand summaries
+  - Suggested `yamc -h <host> <module> <subcommand>` invocations
+- **Do not** dump full configs (no `cat hosts.conf`).
+- **Gracefully degrade** when `RES_DIR` is empty or expected files are missing.
+
+Run `yamc help <module>` after editing `help.loc` to verify output.
+
 ### Environment Variables
 
 These environment variables are available to all scripts:
