@@ -8,6 +8,12 @@ Install Google Chrome browser from Google's official repository.
 yamc -h hostname -u root chrome
 ```
 
+Upgrade an existing install (apt package + optional wrappers from `yamc.local/chrome/`):
+
+```bash
+yamc -h hostname -u root chrome upgrade
+```
+
 ## What It Does
 
 1. Checks architecture (amd64 only)
@@ -20,7 +26,7 @@ yamc -h hostname -u root chrome
 
 - **Idempotent**: Safe to run multiple times
 - **Modern keyring**: Uses `/usr/share/keyrings/` (not deprecated `apt-key`)
-- **Auto-updates**: Repository enables future updates via `apt upgrade`
+- **Auto-updates**: Repository enables future updates via `apt upgrade` or `yamc … chrome upgrade`
 - **NFS wrapper**: Optional wrapper for systems with NFS-mounted home directories
 
 ## Requirements
@@ -78,7 +84,7 @@ Mitigate with:
 ## Notes
 
 - Chrome is only available for 64-bit (amd64) systems
-- Updates will come through normal `apt upgrade`
+- Upgrade with yamc: `yamc -h HOST -u root chrome upgrade`, or `apt upgrade google-chrome-stable` on the host
 
 ## Alternative: Chromium
 

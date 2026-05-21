@@ -1,0 +1,85 @@
+#!/bin/bash
+# chrome/upgrade - Upgrade Google Chrome on Ubuntu
+#
+# Usage: yamc -h hostname -u root chrome upgrade
+#
+# Ensures Google's apt repo is configured, upgrades google-chrome-stable,
+# and refreshes NFS wrapper scripts from yamc.local/chrome/ when present.
+
+set -e
+
+echo "===== Upgrading Google Chrome ====="
+
+if [ -f "$MOD_TMP/env" ]; then
+  . "$MOD_TMP/env"
+fi
+
+ARCH=$(dpkg --print-architecture)
+if [ "$ARCH" != "amd64" ]; then
+  echo "ERROR: Google Chrome only supports amd64 architecture"
+  echo "Current architecture: $ARCH"
+  exit 1
+fi
+
+KEYRING="/usr/share/keyrings/google-chrome.gpg"
+REPO_FILE="/etc/apt/sources.list.d/google-chrome.list"
+
+if [ ! -f "$KEYRING" ]; then
+  echo "Adding Google Chrome signing key..."
+  wget -qO- https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor > "$KEYRING"
+  echo "  ✓ Keyring added: $KEYRING"
+fi
+
+if [ ! -f "$REPO_FILE" ]; then
+  echo "Adding Google Chrome repository..."
+  echo "deb [arch=amd64 signed-by=$KEYRING] http://dl.google.com/linux/chrome/deb/ stable main" > "$REPO_FILE"
+fi
+
+if ! dpkg -l google-chrome-stable 2>/dev/null | grep -q "^ii"; then
+  echo "ERROR: google-chrome-stable is not installed."
+  echo "Run first: yamc -h HOST -u root chrome"
+  exit 1
+fi
+
+OLD_VERSION=$(dpkg -l google-chrome-stable | awk '/^ii/ {print $3}')
+
+echo "Updating package index..."
+apt-get update -qq
+
+echo "Upgrading google-chrome-stable (was $OLD_VERSION)..."
+apt-get install -y --only-upgrade google-chrome-stable
+
+NEW_VERSION=$(dpkg -l google-chrome-stable | awk '/^ii/ {print $3}')
+if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+  echo "  ✓ Already at latest package version: $NEW_VERSION"
+else
+  echo "  ✓ Upgraded: $OLD_VERSION -> $NEW_VERSION"
+fi
+
+if [ -f "$MOD_TMP/google-chrome-wrapper" ]; then
+  echo ""
+  echo "Refreshing Chrome NFS-safe wrapper(s)..."
+
+  MAIN_WRAPPER="/usr/local/bin/google-chrome"
+  if [ -f "$MAIN_WRAPPER" ] && cmp -s "$MOD_TMP/google-chrome-wrapper" "$MAIN_WRAPPER"; then
+    echo "  ✓ google-chrome wrapper already up to date"
+  else
+    cp "$MOD_TMP/google-chrome-wrapper" "$MAIN_WRAPPER"
+    chmod 755 "$MAIN_WRAPPER"
+    echo "  ✓ google-chrome wrapper updated: $MAIN_WRAPPER"
+  fi
+
+  if [ -f "$MOD_TMP/chrome-wrapper" ]; then
+    CHROME_WRAPPER="/usr/local/bin/chrome"
+    if [ -f "$CHROME_WRAPPER" ] && cmp -s "$MOD_TMP/chrome-wrapper" "$CHROME_WRAPPER"; then
+      echo "  ✓ chrome wrapper already up to date"
+    else
+      cp "$MOD_TMP/chrome-wrapper" "$CHROME_WRAPPER"
+      chmod 755 "$CHROME_WRAPPER"
+      echo "  ✓ chrome wrapper updated: $CHROME_WRAPPER"
+    fi
+  fi
+fi
+
+echo ""
+echo "===== Google Chrome Upgrade Complete ====="

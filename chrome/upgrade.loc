@@ -1,0 +1,14 @@
+#!/bin/bash
+# chrome/upgrade.loc - Prepare Chrome wrapper scripts for upgrade (optional)
+
+if [ -f "$RES_DIR/google-chrome" ]; then
+    cp "$RES_DIR/google-chrome" "$MOD_TMP/google-chrome-wrapper"
+    echo "Found google-chrome wrapper script"
+else
+    echo "No google-chrome wrapper in $RES_DIR (browser upgrade only)"
+fi
+
+if [ -f "$RES_DIR/chrome" ]; then
+    cp "$RES_DIR/chrome" "$MOD_TMP/chrome-wrapper"
+    echo "Found chrome convenience wrapper"
+fi
