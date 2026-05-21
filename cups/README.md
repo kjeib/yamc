@@ -8,6 +8,15 @@ Install CUPS and configure network printers, including support for custom PPD fi
 yamc -h hostname -u root cups
 ```
 
+Configure only specific queue(s) by appending their short names from `printers.conf` (first field before `|`). Other queues on the host are not removed or changed.
+
+```bash
+yamc -h hostname -u root cups L
+yamc -h hostname -u root cups setup L M
+```
+
+PPDs and filters under `yamc.local/cups/` are still deployed in full on every run; only `lpadmin` targets the named printer(s).
+
 ## Directory Structure
 
 ```
@@ -60,10 +69,10 @@ PPD files can reference custom CUPS filters. Place filter scripts in `yamc.local
 
 ```bash
 # Example: yamc.local/cups/filters/labfilt.sh
-# Referenced in PPD as: *cupsFilter: "text/plain 0 /usr/local/bin/labfilt.sh"
+# Referenced in PPD as: *cupsFilter: "text/plain 0 /usr/lib/cups/filter/labfilt.sh"
 ```
 
-The module copies filters to `/usr/local/bin/` with mode 755.
+The module copies filters to `/usr/lib/cups/filter/` with mode 755 (AppArmor on Ubuntu allows CUPS to execute filters there, not under `/usr/local/bin/`).
 
 ## Finding Printer URIs
 
@@ -92,7 +101,7 @@ The module uses `-m everywhere` by default. Only specify a driver for:
 1. Installs CUPS, hplip (HP drivers)
 2. Enables CUPS service
 3. **Deploys custom PPD files** to `/usr/share/cups/model/`
-4. **Deploys filter scripts** to `/usr/local/bin/`
+4. **Deploys filter scripts** to `/usr/lib/cups/filter/`
 5. Configures each printer via `lpadmin`
 
 ## Troubleshooting

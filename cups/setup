@@ -56,7 +56,8 @@ if [ -d "$MOD_TMP/filters" ] && [ "$FILTER_COUNT" -gt 0 ]; then
   echo ""
   echo "Installing $FILTER_COUNT custom filter script(s)..."
   
-  FILTER_DEST="/usr/local/bin"
+  # Ubuntu cupsd AppArmor allows filters here, not /usr/local/bin (execv permission denied).
+  FILTER_DEST="/usr/lib/cups/filter"
   mkdir -p "$FILTER_DEST"
   
   for filt in "$MOD_TMP/filters"/*; do

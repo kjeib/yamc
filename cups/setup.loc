@@ -3,6 +3,13 @@
 #
 # Reads printer definitions from yamc.local/cups/printers.conf
 # Also copies custom PPD files and filter scripts if present
+#
+# Optional arguments: CUPS queue name(s). When given, only those queues are
+# added/updated; others are left unchanged. Examples:
+#   yamc -h host cups L
+#   yamc -h host cups setup L M
+
+FILTER_ONLY=("$@")
 
 PRINTERS_FILE="$RES_DIR/printers.conf"
 PPD_DIR="$RES_DIR/ppd"
@@ -59,6 +66,9 @@ if [ ! -f "$PRINTERS_FILE" ]; then
 fi
 
 echo "Reading printer definitions from $PRINTERS_FILE"
+if [ ${#FILTER_ONLY[@]} -gt 0 ]; then
+  echo "  (only configuring: ${FILTER_ONLY[*]})"
+fi
 
 # Read and validate printer definitions
 PRINTER_DEFS=""
@@ -77,6 +87,19 @@ while IFS= read -r line || [ -n "$line" ]; do
     echo "WARNING: Invalid line (missing name or uri): $line"
     continue
   fi
+
+  if [ ${#FILTER_ONLY[@]} -gt 0 ]; then
+    match=false
+    for w in "${FILTER_ONLY[@]}"; do
+      if [ "$name" = "$w" ]; then
+        match=true
+        break
+      fi
+    done
+    if ! $match; then
+      continue
+    fi
+  fi
   
   echo "  Printer: $name -> $uri"
   [ -n "$desc" ] && echo "    Description: $desc"
@@ -87,8 +110,21 @@ while IFS= read -r line || [ -n "$line" ]; do
   count=$((count + 1))
 done < "$PRINTERS_FILE"
 
+if [ ${#FILTER_ONLY[@]} -gt 0 ] && [ $count -eq 0 ]; then
+  echo "ERROR: No printer definition matches: ${FILTER_ONLY[*]}"
+  exit 1
+fi
+
 if [ $count -eq 0 ]; then
   echo "WARNING: No valid printer definitions found"
+fi
+
+if [ ${#FILTER_ONLY[@]} -gt 0 ]; then
+  for w in "${FILTER_ONLY[@]}"; do
+    if ! printf '%s\n' "$PRINTER_DEFS" | grep -qF "${w}|"; then
+      echo "WARNING: No printer definition named '$w' in $PRINTERS_FILE"
+    fi
+  done
 fi
 
 echo ""
