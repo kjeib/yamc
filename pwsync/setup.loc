@@ -1,0 +1,29 @@
+#!/bin/bash
+# pwsync/setup.loc - Prepare pwsync configuration locally
+#
+# Host list resolution, most general to most specific:
+#   yamc.local/cluster.conf         CLUSTER_HOSTS  (shared with other modules)
+#   yamc.local/pwsync/cluster.conf  PWSYNC_HOSTS   (module override)
+
+SHARED_CONF="$(dirname "$RES_BASE")/cluster.conf"
+
+if [ -f "$SHARED_CONF" ]; then
+  source "$SHARED_CONF"
+fi
+
+if [ -f "$RES_DIR/cluster.conf" ]; then
+  source "$RES_DIR/cluster.conf"
+fi
+
+# Module setting wins; otherwise fall back to the shared cluster list.
+PWSYNC_HOSTS="${PWSYNC_HOSTS:-$CLUSTER_HOSTS}"
+
+if [ -z "$PWSYNC_HOSTS" ]; then
+  echo "ERROR: no host list found."
+  echo "       Set CLUSTER_HOSTS in yamc.local/cluster.conf, or"
+  echo "       PWSYNC_HOSTS in yamc.local/pwsync/cluster.conf"
+  exit 1
+fi
+
+echo "pwsync cluster: $PWSYNC_HOSTS"
+echo "PWSYNC_HOSTS=\"$PWSYNC_HOSTS\"" >> "$MOD_TMP/env"

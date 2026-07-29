@@ -1,0 +1,236 @@
+#!/bin/bash
+# pwsync - Change your password on this host and propagate it to peer hosts.
+#
+# Runs entirely as the invoking user: no root, no sudo, no key management.
+# Each host verifies your current password through its own PAM stack and
+# hashes the new one with its own crypt, so nothing privileged is ever
+# transmitted and no hash format has to be portable across the fleet.
+#
+# Peer list comes from ~/.pwsync-hosts if present, else /etc/pwsync.conf.
+#
+# Usage: pwsync [-l|--local-only] [-h|--help]
+
+set -u
+
+CONF="${PWSYNC_CONF:-/etc/pwsync.conf}"
+USER_HOSTS="$HOME/.pwsync-hosts"
+LOCAL_ONLY=false
+HOST_SOURCE="cluster"
+
+# BatchMode is essential, not cosmetic: our stdin carries the password
+# triple, so an interactive ssh prompt (password auth, or an unknown host
+# key confirmation) would silently eat the current password and desync the
+# whole exchange. BatchMode makes ssh fail cleanly instead of prompting.
+SSH_OPTS=(-T
+  -o BatchMode=yes
+  -o PreferredAuthentications=publickey
+  -o ConnectTimeout=10)
+
+usage() {
+  cat <<'EOF'
+Usage: pwsync [options]
+
+Changes your password on this host, then on each peer host, by running
+passwd on each one as you.
+
+Options:
+  -l, --local-only   Change the password here only; do not contact peers
+  -h, --help         Show this help
+
+Peer list:
+  ~/.pwsync-hosts    If present, the hosts YOU have accounts on (one per
+                     line or space separated; # comments allowed). Because
+                     /home is NFS-shared this file follows you everywhere.
+  /etc/pwsync.conf   Otherwise, the full cluster list.
+
+  If you only have accounts on some of the cluster hosts, create
+  ~/.pwsync-hosts so pwsync stops reporting the others as unreachable.
+
+Notes:
+  Peers are reached over SSH using your own key. Because /home (and with it
+  ~/.ssh) is NFS-shared across sub-servers, a single key works everywhere
+  with no distribution step.
+
+  If a peer fails, your password there is unchanged and still the old one.
+  Re-run pwsync once the host is reachable, or have an admin repair it with:
+      yamc -h HOST -u root   (then: chpasswd)
+EOF
+}
+
+die() { echo "pwsync: $*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -l|--local-only) LOCAL_ONLY=true ;;
+    -h|--help)       usage; exit 0 ;;
+    *)               echo "pwsync: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+USER_NAME=$(id -un)
+ME=$(hostname -s)
+
+# ---------------------------------------------------------------- peer list
+PEERS=()
+if [ "$LOCAL_ONLY" = false ]; then
+  HOSTLIST=""
+
+  # A per-user list wins over the cluster list. It lives in the user's NFS
+  # home, so it is automatically identical on every host they log in to.
+  if [ -r "$USER_HOSTS" ]; then
+    HOSTLIST=$(sed 's/#.*//' "$USER_HOSTS" | tr '\n' ' ')
+    HOST_SOURCE="$USER_HOSTS"
+  else
+    [ -r "$CONF" ] || die "cannot read $CONF (is the pwsync module deployed?)"
+    # shellcheck disable=SC1090
+    source "$CONF"
+    HOSTLIST="${PWSYNC_HOSTS:-}"
+    HOST_SOURCE="$CONF"
+  fi
+
+  [ -n "${HOSTLIST// /}" ] || die "no peer hosts defined in $HOST_SOURCE"
+
+  for h in $HOSTLIST; do
+    [ "${h%%.*}" = "$ME" ] && continue        # never push to ourselves
+    PEERS+=("$h")
+  done
+fi
+
+# --------------------------------------------------------------- collect pw
+# Read from the terminal rather than stdin so a stray redirect cannot feed
+# passwords in, and so passwords never appear in argv or the process table.
+# Test by actually opening it: [ -r /dev/tty ] only checks permissions and
+# still succeeds when there is no controlling terminal attached.
+if ! { : < /dev/tty; } 2>/dev/null; then
+  die "no controlling terminal; pwsync must be run interactively"
+fi
+
+if [ ${#PEERS[@]} -gt 0 ]; then
+  TARGETS="$ME ${PEERS[*]}"
+else
+  TARGETS="$ME"
+fi
+printf 'Changing password for %s on: %s\n' "$USER_NAME" "$TARGETS"
+
+read -rsp 'Current password: ' OLDPW < /dev/tty; echo
+[ -n "$OLDPW" ] || die "current password may not be empty"
+
+read -rsp 'New password: '     NEWPW  < /dev/tty; echo
+read -rsp 'Retype new password: ' NEWPW2 < /dev/tty; echo
+
+[ "$NEWPW" = "$NEWPW2" ] || die "new passwords do not match"
+[ -n "$NEWPW" ]          || die "new password may not be empty"
+[ "$NEWPW" != "$OLDPW" ] || die "new password is the same as the old one"
+unset NEWPW2
+
+# Quality gate. We bypass nothing here (each host still runs its own PAM
+# stack) but checking up front means a peer is unlikely to reject the new
+# password mid-fanout and re-prompt, which would desync our line feed.
+if command -v pwscore >/dev/null 2>&1; then
+  if ! score=$(printf '%s' "$NEWPW" | pwscore 2>&1); then
+    die "new password rejected by quality check: $score"
+  fi
+fi
+
+# passwd reads three lines: current, new, retype. We feed exactly that.
+# Deliberately a pipe rather than a here-string: bash may stage a here-string
+# in a temp file, which would put the plaintext on disk.
+feed() { printf '%s\n%s\n%s\n' "$OLDPW" "$NEWPW" "$NEWPW"; }
+
+# ------------------------------------------------------------ local change
+printf '\n%-16s ' "$ME"
+# $? after a command substitution assignment is the status of the last
+# command in the pipeline (passwd) - which is what we want. PIPESTATUS is
+# NOT usable here: the pipeline ran inside the substitution's subshell, so
+# PIPESTATUS describes the assignment and has only one element.
+out=$(feed | LC_ALL=C passwd 2>&1)
+rc=$?
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED"
+  echo "$out" | sed 's/^/    /' >&2
+  die "local password change failed; no peers were contacted"
+fi
+echo "ok"
+
+if [ "$LOCAL_ONLY" = true ] || [ ${#PEERS[@]} -eq 0 ]; then
+  unset OLDPW NEWPW
+  echo
+  echo "Password changed on $ME only."
+  exit 0
+fi
+
+# ----------------------------------------------------------- remote changes
+# Two failure classes, deliberately distinguished:
+#
+#   ssh exit 255  -> ssh itself failed. Either the host is unreachable, or
+#                    we could not authenticate - which is what happens when
+#                    the user simply has no account on that host. Expected
+#                    in a fleet where not everyone exists everywhere.
+#   other non-zero -> we got there and the REMOTE passwd refused. That means
+#                    the current password differs there: genuine drift that
+#                    needs admin repair.
+DRIFTED=()      # reached the host, passwd rejected
+NOACCESS=()     # could not reach or authenticate
+
+classify() {
+  case "$1" in
+    *"Connection refused"*|*"No route to host"*|*"Connection timed out"*|\
+    *"Name or service not known"*|*"Could not resolve"*|*"Network is unreachable"*)
+      echo "host unreachable" ;;
+    *"Permission denied"*)
+      echo "no account here, or key not accepted" ;;
+    *"Host key verification failed"*)
+      echo "host key not trusted" ;;
+    *)
+      echo "ssh failed" ;;
+  esac
+}
+
+for peer in "${PEERS[@]}"; do
+  printf '%-16s ' "$peer"
+  # As above: $? is ssh's status (which propagates the remote passwd's), and
+  # PIPESTATUS would not describe this pipeline.
+  out=$(feed | ssh "${SSH_OPTS[@]}" "$USER_NAME@$peer" 'LC_ALL=C passwd' 2>&1)
+  rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    echo "ok"
+  elif [ "$rc" -eq 255 ]; then
+    echo "skipped ($(classify "$out"))"
+    NOACCESS+=("$peer")
+  else
+    echo "FAILED (remote passwd refused)"
+    echo "$out" | sed 's/^/    /'
+    DRIFTED+=("$peer")
+  fi
+done
+
+unset OLDPW NEWPW
+
+# ----------------------------------------------------------------- summary
+echo
+OK_COUNT=$(( ${#PEERS[@]} - ${#DRIFTED[@]} - ${#NOACCESS[@]} ))
+echo "Changed on $ME and $OK_COUNT of ${#PEERS[@]} peer host(s)."
+
+if [ ${#DRIFTED[@]} -gt 0 ]; then
+  echo
+  echo "DRIFT: reached these hosts but they rejected your current password:"
+  echo "    ${DRIFTED[*]}"
+  echo "  Your password there is out of sync and pwsync cannot fix it."
+  echo "  An admin must reset it:  yamc -h HOST -u root   (then: chpasswd)"
+fi
+
+if [ ${#NOACCESS[@]} -gt 0 ]; then
+  echo
+  echo "SKIPPED: could not reach or log in to:"
+  echo "    ${NOACCESS[*]}"
+  echo "  If you have no account on those hosts, this is expected - list the"
+  echo "  hosts you DO use in $USER_HOSTS to silence this."
+  echo "  If you DO have an account there, your password is now out of sync;"
+  echo "  re-run pwsync once the host is reachable."
+fi
+
+[ ${#DRIFTED[@]} -eq 0 ] && [ ${#NOACCESS[@]} -eq 0 ] && exit 0
+exit 1

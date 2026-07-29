@@ -1,0 +1,44 @@
+#!/bin/bash
+# pwsync/help.loc - Module-specific help
+
+cat <<'EOF'
+Module: pwsync - user-driven password propagation across the cluster
+
+  This module ships the unprivileged command users run to change their own
+  password everywhere. Root-side account work - creating users and groups,
+  setting or resetting a password - lives in the 'accounts' module.
+
+SUBCOMMANDS
+
+  setup                          Install /usr/local/bin/pwsync and
+                                 /etc/pwsync.conf on the target host.
+      yamc -h HOST -u root pwsync
+
+CLUSTER HELPER  (yamc.local/bin/)
+
+  pwsync-cluster-deploy          Install/update pwsync on every host
+
+END-USER COMMAND  (installed on each host)
+
+  pwsync                         Change your password here and on all peers
+  pwsync --local-only            Change it here only
+
+CONFIGURATION
+
+  yamc.local/cluster.conf        CLUSTER_HOSTS - shared with other modules
+  yamc.local/pwsync/cluster.conf PWSYNC_HOSTS  - override, only if password
+                                 sync needs a different host set
+
+  ~/.pwsync-hosts                Optional per-user host list. Lives in the
+                                 user's NFS home so it applies everywhere.
+                                 Use it when someone has accounts on only
+                                 some hosts, to stop the others being
+                                 reported as skipped.
+
+RESULTS
+
+  ok         Password changed there
+  skipped    ssh exited 255 - host unreachable, or no account/key there
+  FAILED     Reached the host but its passwd refused: genuine drift.
+             Repair with:  accounts setpass USERNAME  on that host.
+EOF

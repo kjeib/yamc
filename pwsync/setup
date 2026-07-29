@@ -1,0 +1,84 @@
+#!/bin/bash
+# pwsync/setup - Install the pwsync password propagation tool
+#
+# Usage: yamc -h hostname -u root pwsync
+#
+# Site config (required): yamc.local/pwsync/cluster.conf
+#   PWSYNC_HOSTS="sun aries orion"    # every host in the sync cluster
+
+set -e
+
+echo "===== Installing pwsync ====="
+
+if [ -z "$PWSYNC_HOSTS" ]; then
+  echo "ERROR: PWSYNC_HOSTS not set (setup.loc should have provided it)"
+  exit 1
+fi
+
+# ---------------------------------------------------------------- optional dep
+# pwscore gives us a local password-quality check before fanning out. It is
+# optional: without it each host still applies its own pam_pwquality, we just
+# lose the early warning.
+if ! command -v pwscore >/dev/null 2>&1; then
+  echo "Installing password quality tools..."
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y libpwquality-tools || true
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y libpwquality-tools || true
+  fi
+fi
+
+if command -v pwscore >/dev/null 2>&1; then
+  echo "pwscore available (quality checks enabled)"
+else
+  echo "NOTE: pwscore unavailable - local quality pre-check will be skipped"
+fi
+
+# -------------------------------------------------------------------- script
+# The payload is kept non-executable in the module directory on purpose:
+# yamc discovers subcommands by scanning for executable files, so an
+# executable 'pwsync' there would show up as a bogus 'pwsync pwsync'
+# subcommand. install -m sets the deployed mode explicitly regardless.
+echo "Installing /usr/local/bin/pwsync..."
+install -o root -g root -m 0755 "$MOD_DIR/pwsync" /usr/local/bin/pwsync
+
+# -------------------------------------------------------------------- config
+echo "Writing /etc/pwsync.conf..."
+cat > /etc/pwsync.conf <<EOF
+# pwsync cluster configuration
+#
+# Managed by the yamc pwsync module - edit
+# yamc.local/pwsync/cluster.conf and redeploy instead of editing here.
+#
+# Every host in the password-sync cluster. pwsync skips whichever entry
+# matches the local hostname, so this list is identical on all hosts.
+
+PWSYNC_HOSTS="$PWSYNC_HOSTS"
+EOF
+chmod 0644 /etc/pwsync.conf
+
+# -------------------------------------------------------------------- verify
+echo ""
+echo "Installed:"
+ls -l /usr/local/bin/pwsync
+echo ""
+echo "Cluster: $PWSYNC_HOSTS"
+echo "This host: $(hostname -s)"
+
+# Report the peers this host will actually contact
+PEERS=""
+for h in $PWSYNC_HOSTS; do
+  [ "${h%%.*}" = "$(hostname -s)" ] && continue
+  PEERS="$PEERS $h"
+done
+
+if [ -z "$PEERS" ]; then
+  echo ""
+  echo "WARNING: this host does not appear in PWSYNC_HOSTS, so pwsync will"
+  echo "         try to push to every listed host including possibly itself."
+else
+  echo "Will propagate to:$PEERS"
+fi
+
+echo ""
+echo "===== pwsync Installation Complete ====="
