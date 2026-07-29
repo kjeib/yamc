@@ -28,18 +28,49 @@ PROFILE_FILE="$MOD_DIR/profile"
 
 echo "Setting up shell profile customizations..."
 
-# First determine which file to use (.bash_profile or .bashrc)
-if [ -f "$BASH_PROFILE" ]; then
-  TARGET_PROFILE="$BASH_PROFILE"
-  echo "Found existing .bash_profile, will update if needed."
-elif [ -f "$BASHRC" ]; then
-  TARGET_PROFILE="$BASHRC"
-  echo "Found existing .bashrc, will update if needed."
-else
-  # Create .bash_profile if neither exists
-  TARGET_PROFILE="$BASH_PROFILE"
-  echo "No existing profile found. Creating .bash_profile."
+# The customizations are aliases, which only exist in the shell that defines
+# them and are not exported. They MUST go in .bashrc: bash reads .bash_profile
+# only for login shells, so aliases placed there are missing from every
+# terminal window, which starts a non-login shell. .bashrc is read by every
+# interactive shell, and the standard .bash_profile sources it, so .bashrc
+# covers both cases.
+TARGET_PROFILE="$BASHRC"
+if [ ! -f "$TARGET_PROFILE" ]; then
+  echo "No existing .bashrc found. Creating one."
   touch "$TARGET_PROFILE"
+fi
+
+# A login shell reads .bash_profile (or .profile) and NOT .bashrc, so make sure
+# one of them pulls .bashrc in. Only act when there is no login-shell entry
+# point at all -- never rewrite a file the user already maintains.
+if [ ! -f "$BASH_PROFILE" ] && [ ! -f "$HOME/.profile" ] && [ ! -f "$HOME/.bash_login" ]; then
+  echo "No login-shell startup file found. Creating .bash_profile to source .bashrc."
+  cat > "$BASH_PROFILE" <<'EOF'
+# .bash_profile - read by login shells only.
+
+# Get the aliases and functions
+if [ -f ~/.bashrc ]; then
+	. ~/.bashrc
+fi
+EOF
+elif [ -f "$BASH_PROFILE" ] && ! grep -q '\.bashrc' "$BASH_PROFILE"; then
+  echo "WARNING: $BASH_PROFILE does not source .bashrc; login shells will not"
+  echo "         pick up these aliases. Add: [ -f ~/.bashrc ] && . ~/.bashrc"
+fi
+
+# Migrate a block installed in .bash_profile by an earlier version of this
+# module. That version appended to the end of the file, so the block runs from
+# the marker line to EOF. A backup is kept in case anything follows it.
+if [ -f "$BASH_PROFILE" ] && grep -q "Local additions:" "$BASH_PROFILE" \
+   && ! grep -q "Local additions:" "$TARGET_PROFILE"; then
+  echo "Found customizations in $BASH_PROFILE (wrong file). Migrating to $TARGET_PROFILE..."
+  cp "$BASH_PROFILE" "$BASH_PROFILE.yamc-bak"
+  echo "Backup saved to $BASH_PROFILE.yamc-bak"
+  MARKER_LINE=$(grep -n "Local additions:" "$BASH_PROFILE" | head -1 | cut -d: -f1)
+  [ -s "$TARGET_PROFILE" ] && echo "" >> "$TARGET_PROFILE"
+  sed -n "${MARKER_LINE}"',$p' "$BASH_PROFILE" >> "$TARGET_PROFILE"
+  sed -i "${MARKER_LINE}"',$d' "$BASH_PROFILE"
+  echo "Migration complete."
 fi
 
 # Check if our customizations are already in the profile

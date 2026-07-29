@@ -1,5 +1,6 @@
 #Local additions:
 
+LESS=eFRX
 alias ls='ls --color=tty'
 alias ll='ls -lF'
 alias lt='ll --sort=time -r'

@@ -21,9 +21,24 @@ INPUTRC=/path/to/custom/inputrc yamc -h hostname pref
 ## What It Does
 
 1. Copies your local .inputrc file to the remote machine (if it exists)
-2. Installs a set of useful shell aliases in the user's profile
+2. Installs a set of useful shell aliases in the user's `~/.bashrc`
 3. Keeps track of whether changes have already been made (idempotent)
-4. Works with both .bash_profile and .bashrc depending on what exists
+4. Ensures a login-shell startup file sources `.bashrc`, so the aliases are
+   available in both login and non-login shells
+5. Migrates any block a previous version of this module wrote into
+   `.bash_profile` (keeping a `.bash_profile.yamc-bak` backup)
+
+## Why .bashrc and not .bash_profile
+
+Aliases are per-shell state and are not inherited through the environment, so
+they have to be re-defined by every interactive shell. Bash reads
+`.bash_profile` **only for login shells**; a terminal window starts a non-login
+shell and reads only `.bashrc`. Aliases placed in `.bash_profile` therefore
+appear to "not work" in every terminal you open.
+
+Earlier versions of this module preferred `.bash_profile` whenever it existed,
+which produced exactly that failure. Rule of thumb: aliases and functions go in
+`.bashrc`; `export`s and one-shot login commands go in `.bash_profile`.
 
 ## Default Aliases Added
 
