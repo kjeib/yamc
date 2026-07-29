@@ -85,6 +85,10 @@ lpinfo -v
 
 # For HP printers specifically
 hp-probe
+
+# USB printers republished as driverless IPP
+lsusb
+systemctl status ipp-usb
 ```
 
 ## Driverless IPP (Recommended)
@@ -96,9 +100,31 @@ The module uses `-m everywhere` by default. Only specify a driver for:
 - Special printers (label, receipt, etc.)
 - When driverless doesn't work correctly
 
+## USB-Attached Printers
+
+Modern USB printers are handled driverlessly too. The `ipp-usb` daemon (installed
+by this module) re-publishes an attached USB printer as an IPP Everywhere service
+on loopback and advertises it over mDNS. Address it by its DNS-SD name, exactly
+like a network printer — no driver field, no PPD:
+
+```bash
+O|dnssd://HP%20OfficeJet%20200%20Mobile%20Series%20%5B0A05E6%5D%20(USB)._ipp._tcp.local/|Mobile Inkjet
+```
+
+Get the exact (already percent-encoded) name from `lpinfo -v` on the host the
+printer is plugged into.
+
+Prefer the `dnssd://` form over `ipp://localhost:60000/ipp/print`: `ipp-usb`
+allocates ports from 60000 upward per device, so the port can shift when another
+USB printer is added. The DNS-SD name is stable.
+
+Note that legacy vendor-backend URIs (e.g. `hp:/usb/...?serial=...`) pin to one
+physical unit's serial number and need a vendor PPD — avoid them unless the
+printer genuinely lacks IPP support.
+
 ## What It Does
 
-1. Installs CUPS, hplip (HP drivers)
+1. Installs CUPS, hplip (HP drivers), ipp-usb (USB → driverless IPP), avahi-daemon
 2. Enables CUPS service
 3. **Deploys custom PPD files** to `/usr/share/cups/model/`
 4. **Deploys filter scripts** to `/usr/lib/cups/filter/`

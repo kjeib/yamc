@@ -13,9 +13,11 @@ set -e
 echo "===== Configuring CUPS Printing ====="
 
 # Install CUPS and common drivers
+# ipp-usb re-publishes USB printers as driverless IPP on loopback; avahi-daemon
+# resolves the dnssd:// URIs those (and network printers) are addressed by.
 echo "Installing CUPS packages..."
 apt-get update -qq
-apt-get install -y cups cups-client hplip printer-driver-hpcups
+apt-get install -y cups cups-client hplip printer-driver-hpcups ipp-usb avahi-daemon
 
 # Enable CUPS service
 systemctl enable cups
