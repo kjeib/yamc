@@ -1,0 +1,125 @@
+#!/bin/bash
+# accounts/adduser.loc - Look up one user in LDAP from the control host
+#
+# Usage: yamc -h HOST -u root accounts adduser USERNAME
+#
+# For migrating a straggler after the bulk harvest. Runs the query here so
+# only the control host needs ldap-utils and reachability to the directory.
+#
+# Prints the roster line to paste into yamc.local/accounts/users.conf -
+# LDAP is being decommissioned, so the roster, not the directory, is the
+# long-term source of truth.
+#
+# Site config: yamc.local/accounts/ldap.conf
+
+ACCT_USER="$1"
+
+if [ -z "$ACCT_USER" ]; then
+  echo "ERROR: usage: yamc -h HOST -u root accounts adduser USERNAME"
+  exit 1
+fi
+
+if [ ! -f "$RES_DIR/ldap.conf" ]; then
+  echo "ERROR: no yamc.local/accounts/ldap.conf"
+  echo "       Needs ACCT_LDAP_URI and ACCT_LDAP_BASE"
+  exit 1
+fi
+
+source "$RES_DIR/ldap.conf"
+
+if [ -z "$ACCT_LDAP_URI" ] || [ -z "$ACCT_LDAP_BASE" ]; then
+  echo "ERROR: ACCT_LDAP_URI and ACCT_LDAP_BASE must be set in ldap.conf"
+  exit 1
+fi
+
+if ! command -v ldapsearch >/dev/null 2>&1; then
+  echo "ERROR: ldapsearch not found on this control host."
+  echo "       Install with:  sudo apt install -y ldap-utils"
+  echo "       Or run the query on the directory server itself."
+  exit 1
+fi
+
+export LDAPTLS_REQCERT="${ACCT_LDAP_REQCERT:-never}"
+
+# Unwrap LDIF continuation lines (leading space) into single logical lines.
+unwrap() { sed -e ':a' -e 'N' -e '$!ba' -e 's/\n //g'; }
+
+# Read one attribute, decoding base64 (attr:: value) when present.
+ldif_get() {
+  local attr="$1" src="$2" line val
+  line=$(printf '%s\n' "$src" | grep -im1 "^${attr}:")
+  [ -z "$line" ] && return 1
+  val="${line#*:}"
+  if [ "${val:0:1}" = ":" ]; then
+    val="${val#:}"; val="${val# }"
+    printf '%s' "$val" | base64 -d 2>/dev/null
+  else
+    printf '%s' "${val# }"
+  fi
+}
+
+emit() { printf '%s="%s"\n' "$1" "${2//\"/\\\"}" >> "$MOD_TMP/env"; }
+
+echo "Querying $ACCT_LDAP_URI for '$ACCT_USER'..."
+
+USER_LDIF=$(ldapsearch -xLLL -H "$ACCT_LDAP_URI" -b "$ACCT_LDAP_BASE" \
+              "(&(objectClass=posixAccount)(uid=$ACCT_USER))" \
+              dn uid uidNumber gidNumber homeDirectory loginShell gecos cn \
+              2>/dev/null | unwrap)
+
+if [ -z "$USER_LDIF" ]; then
+  echo "ERROR: no posixAccount for uid=$ACCT_USER in $ACCT_LDAP_BASE"
+  exit 1
+fi
+
+A_UID=$(ldif_get uidNumber      "$USER_LDIF")
+A_GID=$(ldif_get gidNumber      "$USER_LDIF")
+A_HOME=$(ldif_get homeDirectory "$USER_LDIF")
+A_SHELL=$(ldif_get loginShell   "$USER_LDIF")
+A_DN=$(ldif_get dn              "$USER_LDIF")
+A_GECOS=$(ldif_get gecos        "$USER_LDIF")
+[ -z "$A_GECOS" ] && A_GECOS=$(ldif_get cn "$USER_LDIF")
+
+if [ -z "$A_UID" ] || [ -z "$A_GID" ]; then
+  echo "ERROR: LDAP entry for $ACCT_USER has no uidNumber/gidNumber"
+  exit 1
+fi
+
+[ -z "$A_HOME" ]  && A_HOME="/home/$ACCT_USER"
+[ -z "$A_SHELL" ] && A_SHELL="/bin/bash"
+
+# Primary group name from its gidNumber
+GROUP_LDIF=$(ldapsearch -xLLL -H "$ACCT_LDAP_URI" -b "$ACCT_LDAP_BASE" \
+               "(&(objectClass=posixGroup)(gidNumber=$A_GID))" cn \
+               2>/dev/null | unwrap)
+A_GROUP=$(ldif_get cn "$GROUP_LDIF")
+[ -z "$A_GROUP" ] && A_GROUP="$ACCT_USER"
+
+# Supplementary groups. Entries may record membership as memberUid or as a
+# full DN in member/uniqueMember, so query all three forms.
+SUP_LDIF=$(ldapsearch -xLLL -H "$ACCT_LDAP_URI" -b "$ACCT_LDAP_BASE" \
+             "(&(objectClass=posixGroup)(|(memberUid=$ACCT_USER)(member=$A_DN)(uniqueMember=$A_DN)))" \
+             cn gidNumber 2>/dev/null | unwrap)
+
+A_SUPP=$(printf '%s\n' "$SUP_LDIF" | awk -F': ' '/^cn:/ {print $2}' \
+  | grep -v "^${A_GROUP}$" | sort -u | tr '\n' ',' | sed 's/,$//')
+
+echo "  uid=$A_UID gid=$A_GID ($A_GROUP) home=$A_HOME shell=$A_SHELL"
+echo "  gecos='$A_GECOS'"
+[ -n "$A_SUPP" ] && echo "  groups=$A_SUPP"
+
+echo ""
+echo "Add this line to yamc.local/accounts/users.conf:"
+echo "    $ACCT_USER:$A_UID:$A_GID:$A_GECOS:$A_HOME:$A_SHELL:$A_SUPP"
+echo "and this to groups.conf if the primary group is new:"
+echo "    $A_GROUP:$A_GID"
+echo ""
+
+emit ACCT_USER  "$ACCT_USER"
+emit A_UID      "$A_UID"
+emit A_GID      "$A_GID"
+emit A_GROUP    "$A_GROUP"
+emit A_HOME     "$A_HOME"
+emit A_SHELL    "$A_SHELL"
+emit A_GECOS    "$A_GECOS"
+emit A_SUPP     "$A_SUPP"

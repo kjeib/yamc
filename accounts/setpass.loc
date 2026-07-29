@@ -1,0 +1,54 @@
+#!/bin/bash
+# accounts/setpass.loc - Optionally collect a password locally
+#
+# Usage: yamc -h HOST -u root accounts setpass USERNAME
+#        yamc -h HOST -u root -e ACCT_PROMPT=1 accounts setpass USERNAME
+#
+# By default the remote host GENERATES a random temporary password and
+# prints it, so no secret has to travel inbound at all.
+#
+# With ACCT_PROMPT=1 we ask for one here and hand it over via a file in the
+# mounted module tmp directory - deliberately NOT via -e, because yamc
+# builds remote env vars into the ssh command line, where they would be
+# visible in the remote process list.
+
+ACCT_USER="$1"
+
+if [ -z "$ACCT_USER" ]; then
+  echo "ERROR: usage: yamc -h HOST -u root accounts setpass USERNAME"
+  exit 1
+fi
+
+echo "ACCT_USER=\"$ACCT_USER\"" >> "$MOD_TMP/env"
+
+if [ "${ACCT_PROMPT:-0}" != "1" ]; then
+  echo "Will generate a random temporary password on the remote host."
+  exit 0
+fi
+
+if ! { : < /dev/tty; } 2>/dev/null; then
+  echo "ERROR: ACCT_PROMPT=1 needs a terminal"
+  exit 1
+fi
+
+read -rsp "New password for $ACCT_USER: " P1 < /dev/tty; echo
+read -rsp "Retype: "                     P2 < /dev/tty; echo
+
+if [ "$P1" != "$P2" ]; then
+  echo "ERROR: passwords do not match"
+  exit 1
+fi
+if [ -z "$P1" ]; then
+  echo "ERROR: password may not be empty"
+  exit 1
+fi
+
+# Mode 600 before writing any content.
+PASSFILE="$MOD_TMP/newpass"
+: > "$PASSFILE"
+chmod 600 "$PASSFILE"
+printf '%s' "$P1" > "$PASSFILE"
+unset P1 P2
+
+echo "ACCT_PASSFILE=\"\$MOD_TMP/newpass\"" >> "$MOD_TMP/env"
+echo "Password collected; will be applied on the remote host."

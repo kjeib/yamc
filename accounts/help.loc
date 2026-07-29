@@ -1,0 +1,76 @@
+#!/bin/bash
+# accounts/help.loc - Module-specific help
+
+cat <<'EOF'
+Module: accounts - site groups and user accounts
+
+  Everything root does TO accounts lives here. The unprivileged command
+  users run to change their own password lives in the 'pwsync' module.
+
+  RETURNING COLD? Read accounts/README.md first. It explains why the roster
+  is static rather than LDAP-backed, why accounts start locked, and what
+  state the migration is in. Short version:
+
+    - Users came from LDAP on sun. LDAP is being decommissioned, so the
+      directory was harvested ONCE into yamc.local/accounts/*.conf, which
+      are now the source of truth.
+    - LDAP {SSHA} hashes cannot go into /etc/shadow, so every account is
+      created LOCKED and everyone needs a new password once.
+    - As of 2026-07-28 this module had been dry-run tested but NEVER
+      actually applied to any host. pwsync is deployed and working.
+    - This replaces the csync2 plan still described in
+      yamc.local/mailserver/README.md. Ignore that plan.
+
+SUBCOMMANDS
+
+  setup                          Provision groups, then users, from the
+                                 roster in yamc.local/accounts/.
+      yamc -h HOST -u root accounts
+      yamc -h HOST -u root -e ACCT_DRYRUN=1 accounts        # preview
+      yamc -h HOST -u root -e ACCT_GROUPS_ONLY=1 accounts   # groups only
+      yamc -h HOST -u root -e ACCT_USERS="julee,mia" accounts
+      yamc -h HOST -u root -e ACCT_FORCE=1 accounts         # ignore UID guard
+
+  setpass USERNAME               Set or reset a password (root). Generates
+                                 a random one and prints it once, so no
+                                 secret travels inbound.
+      yamc -h HOST -u root accounts setpass julee
+      yamc -h HOST -u root -e ACCT_PROMPT=1 accounts setpass julee
+      yamc -h HOST -u root -e ACCT_EXPIRE=1 accounts setpass julee
+
+  adduser USERNAME               Look up one straggler in LDAP and create
+                                 them. Prints the roster line to paste into
+                                 users.conf.
+      yamc -h HOST -u root accounts adduser someone
+
+CLUSTER HELPERS  (yamc.local/bin/)
+
+  accounts-cluster-deploy        Provision every host in the cluster
+  accounts-cluster-setpass USER  Reset a password on every host
+
+ROSTER  (yamc.local/accounts/)
+
+  groups.conf    name:gid
+                 gid of '-' means a distribution system group: never
+                 create it, only add members. LDAP's audio=63 conflicts
+                 with Ubuntu's audio=29, which is why this exists.
+
+  users.conf     user:uid:gid:gecos:home:shell:supplementary_groups
+                 Group membership lives here, so adding a person is one
+                 line. UIDs are pinned because /home is NFS-shared.
+
+  ldap.conf      Only for 'adduser'. Delete when sun is decommissioned.
+
+SAFETY
+
+  Home directories are NEVER created (useradd -M): /home is NFS-mounted and
+  already holds the users' files.
+
+  Before creating an account, the existing home directory is checked:
+    UID mismatch -> hard failure (the user could not read their own files)
+    GID mismatch -> warning only (a home group-owned by a shared group,
+                    such as /home/mia being 1005:1500, is normal)
+
+  Accounts are created LOCKED. LDAP {SSHA} hashes are not a crypt(3) format
+  and cannot be migrated. Use setpass, then have the user run pwsync.
+EOF

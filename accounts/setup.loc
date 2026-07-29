@@ -1,0 +1,61 @@
+#!/bin/bash
+# accounts/setup.loc - Validate the account roster before deploying
+#
+# The roster files are read directly on the remote host from the mounted
+# resources directory, so nothing needs to be marshalled through the
+# environment. This script only sanity-checks them and reports.
+
+GROUPS_CONF="$RES_DIR/groups.conf"
+USERS_CONF="$RES_DIR/users.conf"
+
+if [ ! -f "$GROUPS_CONF" ]; then
+  echo "ERROR: no roster found at yamc.local/accounts/groups.conf"
+  echo "       Harvest one from LDAP, or create it by hand:"
+  echo "         name:gid      ('-' as gid = system group, membership only)"
+  exit 1
+fi
+
+strip() { sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^$/d' "$1"; }
+
+NGROUPS=$(strip "$GROUPS_CONF" | wc -l)
+echo "Roster: $NGROUPS group(s) in groups.conf"
+
+# Reject malformed group records early - a bad line here creates a group
+# with the wrong GID on every host in the cluster.
+BAD=0
+while IFS=: read -r name gid extra; do
+  [ -z "$name" ] && continue
+  if [ -z "$gid" ] || [ -n "$extra" ]; then
+    echo "  MALFORMED (want name:gid): $name:$gid$extra"
+    BAD=$((BAD + 1))
+  elif [ "$gid" != "-" ] && ! [[ "$gid" =~ ^[0-9]+$ ]]; then
+    echo "  MALFORMED gid for '$name': $gid"
+    BAD=$((BAD + 1))
+  fi
+done < <(strip "$GROUPS_CONF")
+
+if [ -f "$USERS_CONF" ]; then
+  NUSERS=$(strip "$USERS_CONF" | wc -l)
+  echo "Roster: $NUSERS user(s) in users.conf"
+
+  while IFS=: read -r user uid gid gecos home shell supp; do
+    [ -z "$user" ] && continue
+    if ! [[ "$uid" =~ ^[0-9]+$ ]] || ! [[ "$gid" =~ ^[0-9]+$ ]]; then
+      echo "  MALFORMED uid/gid for '$user': $uid/$gid"
+      BAD=$((BAD + 1))
+    fi
+    if [ -z "$home" ] || [ -z "$shell" ]; then
+      echo "  MALFORMED (want user:uid:gid:gecos:home:shell:groups): $user"
+      BAD=$((BAD + 1))
+    fi
+  done < <(strip "$USERS_CONF")
+else
+  echo "No users.conf - will provision groups only."
+fi
+
+if [ "$BAD" -gt 0 ]; then
+  echo "ERROR: $BAD malformed roster record(s); refusing to deploy"
+  exit 1
+fi
+
+echo "Roster looks well-formed."

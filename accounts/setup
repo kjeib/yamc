@@ -1,0 +1,98 @@
+#!/bin/bash
+# accounts/setup - Provision groups and users from the site roster
+#
+# Usage: yamc -h HOST -u root accounts
+#        yamc -h HOST -u root -e ACCT_DRYRUN=1 accounts        # preview
+#        yamc -h HOST -u root -e ACCT_GROUPS_ONLY=1 accounts   # groups only
+#        yamc -h HOST -u root -e ACCT_USERS="julee,mia" accounts
+#        yamc -h HOST -u root -e ACCT_FORCE=1 accounts         # ignore UID guard
+#
+# Roster comes from yamc.local/accounts/{groups.conf,users.conf}, read
+# directly from the sshfs-mounted resources directory.
+#
+# Home directories are NEVER created: /home is NFS-mounted and already holds
+# the users' files.
+
+source "$MOD_DIR/common.sh"
+
+GROUPS_CONF="$RES_DIR/groups.conf"
+USERS_CONF="$RES_DIR/users.conf"
+
+ACCT_GROUPS_ONLY="${ACCT_GROUPS_ONLY:-0}"
+ACCT_USERS="${ACCT_USERS:-}"
+
+echo "===== accounts: provisioning $(hostname -s) ====="
+[ "$ACCT_DRYRUN" = "1" ] && echo "(DRY RUN - nothing will be changed)"
+
+if [ ! -f "$GROUPS_CONF" ]; then
+  echo "ERROR: no roster at yamc.local/accounts/groups.conf"
+  exit 1
+fi
+
+FAILED=0
+
+# ------------------------------------------------------------------ groups
+echo ""
+echo "--- Groups ---"
+while IFS=: read -r name gid; do
+  [ -z "$name" ] && continue
+  ensure_group "$name" "$gid" || FAILED=$((FAILED + 1))
+done < <(acct_records "$GROUPS_CONF")
+
+if [ "$ACCT_GROUPS_ONLY" = "1" ]; then
+  echo ""
+  echo "ACCT_GROUPS_ONLY=1 - stopping before users."
+  echo "===== accounts complete ($FAILED problem(s)) ====="
+  [ "$FAILED" -eq 0 ] || exit 1
+  exit 0
+fi
+
+# ------------------------------------------------------------------- users
+if [ ! -f "$USERS_CONF" ]; then
+  echo ""
+  echo "No users.conf - groups only."
+  echo "===== accounts complete ($FAILED problem(s)) ====="
+  [ "$FAILED" -eq 0 ] || exit 1
+  exit 0
+fi
+
+echo ""
+if [ -n "$ACCT_USERS" ]; then
+  echo "--- Users (limited to: $ACCT_USERS) ---"
+else
+  echo "--- Users ---"
+fi
+
+SKIPPED=0
+while IFS=: read -r user uid gid gecos home shell supp; do
+  [ -z "$user" ] && continue
+
+  # Optional subset filter
+  if [ -n "$ACCT_USERS" ]; then
+    case ",$ACCT_USERS," in
+      *",$user,"*) ;;
+      *) SKIPPED=$((SKIPPED + 1)); continue ;;
+    esac
+  fi
+
+  ensure_user "$user" "$uid" "$gid" "$gecos" "$home" "$shell" "$supp" \
+    || FAILED=$((FAILED + 1))
+done < <(acct_records "$USERS_CONF")
+
+[ "$SKIPPED" -gt 0 ] && echo "  ($SKIPPED user(s) not in ACCT_USERS, skipped)"
+
+# ------------------------------------------------------------------ report
+echo ""
+if [ "$ACCT_DRYRUN" = "1" ]; then
+  echo "Dry run only - nothing was changed."
+elif [ "$FAILED" -eq 0 ]; then
+  echo "All roster entries provisioned."
+  echo ""
+  echo "Accounts are created LOCKED. To give someone access:"
+  echo "    yamc -h $(hostname -s) -u root accounts setpass USERNAME"
+  echo "    (then have them run pwsync to set their own password everywhere)"
+fi
+
+echo "===== accounts complete ($FAILED problem(s)) ====="
+[ "$FAILED" -eq 0 ] || exit 1
+exit 0

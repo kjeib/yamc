@@ -1,0 +1,44 @@
+#!/bin/bash
+# accounts/adduser - Create one account from an LDAP lookup
+#
+# Usage: yamc -h HOST -u root accounts adduser USERNAME
+#        yamc -h HOST -u root -e ACCT_DRYRUN=1 accounts adduser USERNAME
+#        yamc -h HOST -u root -e ACCT_FORCE=1  accounts adduser USERNAME
+#
+# Values come from adduser.loc, which queried the directory. Uses the same
+# creation path and the same UID guard as bulk provisioning.
+#
+# Prefer 'yamc -h HOST -u root accounts' once the user is in the roster;
+# this subcommand is for pulling in a straggler that was missed.
+
+source "$MOD_DIR/common.sh"
+
+if [ -z "$ACCT_USER" ] || [ -z "$A_UID" ] || [ -z "$A_GID" ]; then
+  echo "ERROR: account details missing (adduser.loc should have provided them)"
+  exit 1
+fi
+
+echo "===== accounts adduser: $ACCT_USER on $(hostname -s) ====="
+[ "$ACCT_DRYRUN" = "1" ] && echo "(DRY RUN - nothing will be changed)"
+
+echo ""
+echo "--- Primary group ---"
+ensure_group "$A_GROUP" "$A_GID" || exit 1
+
+echo ""
+echo "--- User ---"
+ensure_user "$ACCT_USER" "$A_UID" "$A_GID" "$A_GECOS" \
+            "$A_HOME" "$A_SHELL" "$A_SUPP" || exit 1
+
+echo ""
+if [ "$ACCT_DRYRUN" = "1" ]; then
+  echo "Dry run only - nothing was changed."
+else
+  echo "Result: $(getent passwd "$ACCT_USER" 2>/dev/null || echo '(not created)')"
+  echo "Groups: $(id -nG "$ACCT_USER" 2>/dev/null || echo '-')"
+  echo ""
+  echo "Next:  yamc -h $(hostname -s) -u root accounts setpass $ACCT_USER"
+  echo "Also:  add the roster line printed above to users.conf, so this"
+  echo "       account survives LDAP being decommissioned."
+fi
+echo "===== adduser complete ====="

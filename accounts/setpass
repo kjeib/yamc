@@ -1,0 +1,87 @@
+#!/bin/bash
+# accounts/setpass - Set or reset a user's password on this host (as root)
+#
+# Usage: yamc -h HOST -u root accounts setpass USERNAME
+#        yamc -h HOST -u root -e ACCT_PROMPT=1 accounts setpass USERNAME
+#        yamc -h HOST -u root -e ACCT_EXPIRE=1 accounts setpass USERNAME
+#
+# Two jobs, same mechanism:
+#   - bootstrap a newly provisioned (locked) account
+#   - repair a host where a user's password has drifted out of sync
+#
+# For the drift case, run it on the affected host and then tell the user to
+# run pwsync so every host converges again.
+
+source "$MOD_DIR/common.sh"
+
+ACCT_EXPIRE="${ACCT_EXPIRE:-0}"
+ACCT_PASSFILE="${ACCT_PASSFILE:-}"
+
+if [ -z "$ACCT_USER" ]; then
+  echo "ERROR: no username (setpass.loc should have provided it)"
+  exit 1
+fi
+
+echo "===== accounts setpass: $ACCT_USER on $(hostname -s) ====="
+
+if ! getent passwd "$ACCT_USER" >/dev/null 2>&1; then
+  echo "ERROR: no such user '$ACCT_USER' on this host"
+  echo "       Provision it first:  yamc -h $(hostname -s) -u root accounts"
+  exit 1
+fi
+
+GENERATED=0
+if [ -n "$ACCT_PASSFILE" ] && [ -r "$ACCT_PASSFILE" ]; then
+  NEWPASS=$(cat "$ACCT_PASSFILE")
+  echo "Using the password collected on the control host."
+else
+  # Generate locally so no secret travels inbound. Ambiguous characters
+  # (0/O, 1/l/I) are excluded since this gets read aloud or typed once.
+  NEWPASS=$(tr -dc 'A-HJ-NP-Za-km-z2-9' < /dev/urandom | head -c 14)
+  GENERATED=1
+  echo "Generated a random temporary password."
+fi
+
+if [ -z "$NEWPASS" ]; then
+  echo "ERROR: empty password"
+  exit 1
+fi
+
+if [ "$ACCT_DRYRUN" = "1" ]; then
+  echo "    [dry-run] chpasswd for $ACCT_USER"
+  echo "    [dry-run] passwd -u $ACCT_USER"
+  [ "$ACCT_EXPIRE" = "1" ] && echo "    [dry-run] chage -d 0 $ACCT_USER"
+  echo "===== dry run - nothing changed ====="
+  exit 0
+fi
+
+# Pipe rather than a here-string: bash may stage a here-string in a temp
+# file, putting the plaintext on disk.
+if ! printf '%s:%s\n' "$ACCT_USER" "$NEWPASS" | chpasswd; then
+  echo "ERROR: chpasswd failed"
+  exit 1
+fi
+
+# Provisioned accounts start locked; setting a password does not unlock them.
+passwd -u "$ACCT_USER" >/dev/null 2>&1 || true
+
+if [ "$ACCT_EXPIRE" = "1" ]; then
+  chage -d 0 "$ACCT_USER"
+  echo "Password marked expired - user must change it at next login."
+fi
+
+echo ""
+if [ "$GENERATED" = "1" ]; then
+  echo "  Temporary password for $ACCT_USER:   $NEWPASS"
+  echo ""
+  echo "  Shown once. Relay it out of band."
+else
+  echo "  Password set for $ACCT_USER."
+fi
+
+unset NEWPASS
+
+echo ""
+echo "Next: have $ACCT_USER log in here and run:  pwsync"
+echo "      That sets their own password across every host in the cluster."
+echo "===== setpass complete ====="
