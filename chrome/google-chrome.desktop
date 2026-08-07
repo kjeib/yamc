@@ -1,0 +1,32 @@
+[Desktop Entry]
+# Installed by the yamc 'chrome' module into /usr/local/share/applications/.
+#
+# This shadows the entry of the same name that google-chrome-stable ships in
+# /usr/share/applications/. It is identical to Google's file except that Exec
+# points at the NFS-safe wrapper instead of /usr/bin/google-chrome-stable, so
+# every desktop-entry launch gets the correct --user-data-dir.
+#
+# TryExec means that if the wrapper is ever removed, this entry is treated as
+# invalid and the system falls back to Google's original file.
+Version=1.0
+Name=Google Chrome
+GenericName=Web Browser
+Comment=Access the Internet
+Exec=/usr/local/bin/google-chrome %U
+TryExec=/usr/local/bin/google-chrome
+StartupNotify=true
+Terminal=false
+Icon=google-chrome
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=application/pdf;application/rdf+xml;application/rss+xml;application/xhtml+xml;application/xhtml_xml;application/xml;image/gif;image/jpeg;image/png;image/webp;text/html;text/xml;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/google-chrome;
+Actions=new-window;new-private-window;
+@NODISPLAY@
+
+[Desktop Action new-window]
+Name=New Window
+Exec=/usr/local/bin/google-chrome
+
+[Desktop Action new-private-window]
+Name=New Incognito Window
+Exec=/usr/local/bin/google-chrome --incognito

@@ -21,6 +21,7 @@ yamc -h hostname -u root chrome upgrade
 3. Adds Google's apt repository
 4. Installs `google-chrome-stable`
 5. Installs wrapper script (if configured) for NFS environments
+6. Installs desktop entries so GUI and URL launches use the wrapper
 
 ## Features
 
@@ -72,7 +73,57 @@ chrome --profile personal
 chrome https://example.com
 ```
 
+### Desktop Entries
+
+A PATH-based wrapper is not enough on its own. The `.desktop` files that
+`google-chrome-stable` installs into `/usr/share/applications/` hardcode:
+
+```
+Exec=/usr/bin/google-chrome-stable %U
+```
+
+so anything launching Chrome through the desktop-entry layer bypasses the wrapper.
+That layer is how nearly all URL opening happens — `xdg-open`, `exo-open`, `gio`,
+and `xdg-desktop-portal`, the last being the *only* way a confined snap (Ubuntu's
+Thunderbird, for one) can open a link at all. A snap cannot even see
+`/usr/local/bin`, so pointing it directly at the wrapper can never work.
+
+The symptom on an NFS-home system: clicking a link starts Chrome with no
+`--user-data-dir`, so it lands on `~/.config/google-chrome` (on NFS, often holding
+a stale `SingletonLock` from another host) rather than the local profile the running
+browser uses. The URL cannot be handed to the existing window, so you get either a
+failed launch or a second browser.
+
+This module therefore installs two shadowing entries in
+`/usr/local/share/applications/`:
+
+| File | Purpose |
+|------|---------|
+| `google-chrome.desktop` | Menu entry; carries legacy default-browser settings |
+| `com.google.Chrome.desktop` | The application ID `xdg-desktop-portal` resolves (`NoDisplay=true` so the menu shows one Chrome) |
+
+`/usr/local/share` precedes `/usr/share` in `XDG_DATA_DIRS`, so same-named files
+shadow Google's by desktop ID. Because they live in `/usr/local`, they also survive
+`google-chrome-stable` package upgrades, which rewrite `/usr/share/applications/`.
+Both entries set `TryExec`, so if the wrapper is ever removed the system falls back
+to Google's originals rather than breaking.
+
+Generated from the `google-chrome.desktop` template in this module by
+`desktop-entries.sh`, which `setup` and `upgrade` both source.
+
 **GUI launchers** (application menu, desktop files) automatically use the wrapper too.
+
+### Snap Applications and the Portal
+
+For a snap such as Thunderbird to open links at all, the host needs
+`xdg-desktop-portal` and a backend (`xdg-desktop-portal-gtk` on XFCE) installed.
+Add these to your `packages desktop` list — they are not pulled in reliably.
+
+Snap Thunderbird also needs its own handler setting changed once per user profile,
+since by default it tries to exec a helper path it cannot see from inside the
+sandbox. With Thunderbird closed, set both `http` and `https` in
+`~/.thunderbird/<profile>/handlers.json` to `"action": 4` (useSystemDefault) so it
+hands the URL to the portal instead.
 
 ### Tradeoff
 

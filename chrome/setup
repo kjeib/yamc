@@ -16,6 +16,11 @@ if [ -f "$MOD_TMP/env" ]; then
   . "$MOD_TMP/env"
 fi
 
+# Shared helper: desktop entries that route launches through the wrapper
+if [ -f "$MOD_DIR/desktop-entries.sh" ]; then
+  . "$MOD_DIR/desktop-entries.sh"
+fi
+
 # Check architecture
 ARCH=$(dpkg --print-architecture)
 if [ "$ARCH" != "amd64" ]; then
@@ -101,7 +106,12 @@ if [ -f "$MOD_TMP/google-chrome-wrapper" ]; then
       echo "  ✓ chrome wrapper installed: $CHROME_WRAPPER"
     fi
   fi
-  
+
+  # Desktop entries must point at the wrapper, or every GUI/URL launch bypasses it
+  if command -v install_chrome_desktop_entries >/dev/null 2>&1; then
+    install_chrome_desktop_entries
+  fi
+
   echo ""
   echo "===== Google Chrome Installation Complete ====="
   echo ""
@@ -111,7 +121,8 @@ if [ -f "$MOD_TMP/google-chrome-wrapper" ]; then
   echo "Named profiles: chrome -p work"
   echo "                chrome --profile personal"
   echo ""
-  echo "GUI launchers also use the wrapper automatically."
+  echo "GUI launchers, xdg-open and xdg-desktop-portal (snap apps such as"
+  echo "Thunderbird) now route through the wrapper too."
 else
   echo ""
   echo "===== Google Chrome Installation Complete ====="

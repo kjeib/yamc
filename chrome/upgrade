@@ -14,6 +14,11 @@ if [ -f "$MOD_TMP/env" ]; then
   . "$MOD_TMP/env"
 fi
 
+# Shared helper: desktop entries that route launches through the wrapper
+if [ -f "$MOD_DIR/desktop-entries.sh" ]; then
+  . "$MOD_DIR/desktop-entries.sh"
+fi
+
 ARCH=$(dpkg --print-architecture)
 if [ "$ARCH" != "amd64" ]; then
   echo "ERROR: Google Chrome only supports amd64 architecture"
@@ -78,6 +83,11 @@ if [ -f "$MOD_TMP/google-chrome-wrapper" ]; then
       chmod 755 "$CHROME_WRAPPER"
       echo "  ✓ chrome wrapper updated: $CHROME_WRAPPER"
     fi
+  fi
+
+  # A Chrome package upgrade rewrites /usr/share/applications; re-assert our shadows
+  if command -v install_chrome_desktop_entries >/dev/null 2>&1; then
+    install_chrome_desktop_entries
   fi
 fi
 
