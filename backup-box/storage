@@ -1,0 +1,159 @@
+#!/bin/bash
+# backup-box/storage - claim unallocated space for the backup repository volume
+#
+# The Ubuntu installer leaves most of a large disk unallocated in the volume
+# group. This creates a SEPARATE logical volume for backups rather than
+# extending root, so a runaway repository fills its own filesystem instead of
+# wedging the box.
+#
+# Usage: yamc -h HOST backup-box storage [-e yes=1]
+#
+# This is the only part of the system that can destroy data. It is deliberately
+# timid - see "Safety rules" in README.md. In particular it NEVER touches an
+# existing logical volume, and mkfs only ever runs on an LV created in this
+# same invocation.
+
+set -e
+
+source "$MOD_DIR/common.sh"
+
+bk_banner storage
+bk_need_root
+
+command -v lvs >/dev/null 2>&1 || bk_die "LVM tools not found - this module expects an LVM install"
+
+# ---------------------------------------------------------------------------
+# Idempotence: if our LV already exists and is mounted where we want it,
+# there is nothing to do. If it exists but is NOT mounted, that is unexpected
+# state and we refuse rather than guessing.
+# ---------------------------------------------------------------------------
+if [ -n "$BK_VG" ] && lvs "$BK_VG/$BK_LV" >/dev/null 2>&1; then
+  LV_EXISTS=true
+elif [ -z "$BK_VG" ] && lvs --noheadings -o lv_name,vg_name 2>/dev/null | awk '{print $1}' | grep -qx "$BK_LV"; then
+  LV_EXISTS=true
+else
+  LV_EXISTS=false
+fi
+
+if [ "$LV_EXISTS" = true ]; then
+  echo "Logical volume '$BK_LV' already exists."
+  if bk_mount_ready; then
+    echo "  $BK_MOUNT is mounted:"
+    df -h "$BK_MOUNT" | tail -n +2 | sed 's/^/    /'
+    echo
+    echo "Nothing to do."
+    exit 0
+  fi
+  echo
+  echo "  ...but $BK_MOUNT is NOT mounted."
+  echo
+  echo "  Refusing to act. This script never reuses or reformats an existing"
+  echo "  logical volume - that is how backups get destroyed. Resolve by hand:"
+  echo "    lvs; blkid /dev/$BK_LV; mount | grep $BK_MOUNT"
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Pick the volume group. Autodetect only when there is exactly one candidate.
+# ---------------------------------------------------------------------------
+if [ -z "$BK_VG" ]; then
+  VG_COUNT=$(vgs --noheadings -o vg_name 2>/dev/null | wc -l)
+  if [ "$VG_COUNT" -eq 0 ]; then
+    bk_die "No volume groups found. Nothing to carve from."
+  elif [ "$VG_COUNT" -gt 1 ]; then
+    echo "Multiple volume groups found:"
+    vgs --noheadings -o vg_name,vg_size,vg_free | sed 's/^/    /'
+    bk_die "Ambiguous. Re-run with -e bk_vg=<name>."
+  fi
+  BK_VG=$(vgs --noheadings -o vg_name | tr -d ' ')
+fi
+
+vgs "$BK_VG" >/dev/null 2>&1 || bk_die "Volume group '$BK_VG' not found"
+
+VG_FREE=$(vgs --noheadings -o vg_free --units g "$BK_VG" | tr -d ' ')
+VG_FREE_EXT=$(vgs --noheadings -o vg_free_count "$BK_VG" | tr -d ' ')
+
+if [ "${VG_FREE_EXT:-0}" -eq 0 ]; then
+  echo "Volume group '$BK_VG' has no free extents."
+  vgs "$BK_VG" | sed 's/^/    /'
+  bk_die "Nothing to allocate. If the disk really is larger, check that the installer's LV is not already using all of it."
+fi
+
+# ---------------------------------------------------------------------------
+# Report the plan. This runs whether or not we go on to act, so the report can
+# never drift out of sync with the action.
+# ---------------------------------------------------------------------------
+MKFS_OPTS=""
+[ "$BK_FSTYPE" = "ext4" ] && MKFS_OPTS="-m 0"
+
+echo
+echo "Current layout:"
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT 2>/dev/null | sed 's/^/    /' || true
+echo
+echo "Volume group '$BK_VG' has $VG_FREE free ($VG_FREE_EXT extents)."
+echo
+echo "PLAN:"
+echo "    lvcreate -l $BK_SIZE -n $BK_LV $BK_VG"
+echo "    mkfs.$BK_FSTYPE $MKFS_OPTS /dev/$BK_VG/$BK_LV"
+echo "    mkdir -p $BK_MOUNT"
+echo "    add to /etc/fstab by UUID:  $BK_MOUNT  $BK_FSTYPE  defaults,noexec,nodev,nosuid  0 2"
+echo "    mount $BK_MOUNT"
+echo "    mkdir -p $BK_REPOS"
+echo
+if [ "$BK_FSTYPE" = "ext4" ]; then
+  echo "  Note: -m 0 disables ext4's 5% root reserve. On a multi-TB data volume"
+  echo "        that default would waste over a hundred gigabytes for a"
+  echo "        filesystem root never writes to."
+fi
+echo "  Note: noexec,nodev,nosuid - this volume holds nothing but opaque blobs."
+echo
+echo "  This does NOT touch the root LV or any existing volume."
+
+bk_confirm "create and mount $BK_MOUNT" || exit 1
+
+# ---------------------------------------------------------------------------
+# Act. Everything below runs only on the LV we create here, in this run.
+# ---------------------------------------------------------------------------
+echo
+echo "Creating logical volume..."
+bk_run lvcreate -l "$BK_SIZE" -n "$BK_LV" "$BK_VG"
+
+LV_PATH="/dev/$BK_VG/$BK_LV"
+[ -b "$LV_PATH" ] || bk_die "Expected block device $LV_PATH does not exist after lvcreate"
+
+# Guard: refuse to mkfs anything that already carries a filesystem. A freshly
+# created LV should be blank; if it is not, something is wrong and stopping is
+# cheaper than finding out later.
+EXISTING_FS=$(blkid -o value -s TYPE "$LV_PATH" 2>/dev/null || true)
+if [ -n "$EXISTING_FS" ]; then
+  bk_die "$LV_PATH already contains a '$EXISTING_FS' filesystem. Refusing to mkfs. Investigate by hand."
+fi
+
+echo
+echo "Creating filesystem..."
+bk_run "mkfs.$BK_FSTYPE" $MKFS_OPTS "$LV_PATH"
+
+echo
+echo "Mounting..."
+bk_run mkdir -p "$BK_MOUNT"
+
+UUID=$(blkid -o value -s UUID "$LV_PATH")
+[ -n "$UUID" ] || bk_die "Could not read UUID from $LV_PATH"
+
+if grep -q "UUID=$UUID" /etc/fstab; then
+  echo "    fstab entry already present"
+else
+  [ -f /etc/fstab.orig ] || cp /etc/fstab /etc/fstab.orig
+  echo "UUID=$UUID $BK_MOUNT $BK_FSTYPE defaults,noexec,nodev,nosuid 0 2" >> /etc/fstab
+  echo "    added fstab entry by UUID"
+fi
+
+bk_run mount "$BK_MOUNT"
+bk_run mkdir -p "$BK_REPOS"
+bk_run chmod 700 "$BK_REPOS"
+
+echo
+echo "===================================================================="
+df -h "$BK_MOUNT" | sed 's/^/  /'
+echo "===================================================================="
+echo "Storage ready. Next: yamc -h $(hostname) backup-box -e bk_users=<source-host>"

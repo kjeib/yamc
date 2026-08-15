@@ -1,0 +1,245 @@
+#!/bin/bash
+# backup-box/setup - install and configure rest-server for restic repositories
+#
+# Serves an append-only restic repository store, bound to the tunnel address
+# only. The box never holds a repository password, so everything under
+# $BK_REPOS is opaque to this machine.
+#
+# Usage: yamc -h HOST backup-box -e bk_users="uranus" [-e yes=1]
+#
+# Options:
+#   -e bk_users="a b"     rest-server users to create, one per source host
+#   -e bk_addr=10.9.9.2   bind address (default: read from the tunnel iface)
+#   -e rsrv_url=URL       release tarball, when no distribution package exists
+#   -e rsrv_sha256=HASH   REQUIRED with rsrv_url - see "Installing" below
+
+set -e
+
+source "$MOD_DIR/common.sh"
+
+bk_banner setup
+bk_need_root
+
+# ---------------------------------------------------------------------------
+# Preconditions
+# ---------------------------------------------------------------------------
+bk_mount_ready || bk_die "$BK_MOUNT is not mounted. Run 'backup-box storage' first."
+
+LISTEN_ADDR=$(bk_tunnel_addr)
+if [ -z "$LISTEN_ADDR" ]; then
+  echo "Could not determine a bind address."
+  echo
+  echo "  Interface '$BK_IFACE' has no IPv4 address, which means the tunnel is"
+  echo "  not up. Run 'wg-peer' first, or pass -e bk_addr=<addr> explicitly."
+  echo
+  echo "  This is fatal on purpose. Binding a repository service to a wildcard"
+  echo "  address on a box in hostile territory would expose it to the local"
+  echo "  network it is supposed to be hidden from."
+  exit 1
+fi
+
+if [ -z "$BK_USERS" ]; then
+  bk_die "No users specified. Use -e bk_users=\"<source-host>\" (one per source host)."
+fi
+
+# ---------------------------------------------------------------------------
+# Report the plan
+# ---------------------------------------------------------------------------
+echo
+echo "PLAN:"
+echo "    repository store : $BK_REPOS"
+echo "    listen           : $LISTEN_ADDR:$BK_PORT   (tunnel only)"
+echo "    mode             : --append-only --private-repos"
+echo "    users            : $BK_USERS"
+echo
+echo "  --append-only means a compromised box cannot delete backup history."
+echo "  --private-repos means each user can only reach paths under its own name."
+echo
+echo "  Existing users keep their credentials; only missing users are created,"
+echo "  and their generated password is printed ONCE."
+
+bk_confirm "install and configure rest-server" || exit 1
+
+# ---------------------------------------------------------------------------
+# Install
+#
+# Ubuntu does not reliably package rest-server, so prefer a distribution
+# package when one exists and otherwise require an explicitly checksummed
+# download. An unverified binary that serves your offsite backups is not a
+# trade worth making for convenience.
+# ---------------------------------------------------------------------------
+if command -v rest-server >/dev/null 2>&1; then
+  echo
+  echo "rest-server already installed: $(command -v rest-server)"
+elif apt-get install -y --dry-run rest-server >/dev/null 2>&1; then
+  echo
+  echo "Installing rest-server from the distribution..."
+  bk_run apt-get update -qq
+  bk_run apt-get install -y rest-server
+else
+  echo
+  echo "No distribution package for rest-server on this host."
+  if [ -z "${rsrv_url:-}" ] || [ -z "${rsrv_sha256:-}" ]; then
+    echo
+    echo "  Supply a pinned release and its checksum from the project's"
+    echo "  releases page:"
+    echo
+    echo "    -e rsrv_url=https://.../rest-server_x.y.z_linux_amd64.tar.gz \\"
+    echo "    -e rsrv_sha256=<sha256 from the release's checksum file>"
+    echo
+    echo "  The checksum is required, not optional. Verify it against the"
+    echo "  project's signed checksum file, not against the download itself."
+    exit 1
+  fi
+
+  # Work in a genuinely local temp dir. $MOD_TMP lives on the sshfs mount
+  # back to the yamc host, so downloading and extracting there would push the
+  # whole tarball over the network twice.
+  WORK=$(mktemp -d /tmp/backup-box.XXXXXX)
+  trap 'rm -rf "$WORK"' EXIT
+
+  TARBALL="$WORK/rest-server.tar.gz"
+  echo "Downloading $rsrv_url"
+  bk_run curl -fsSL -o "$TARBALL" "$rsrv_url"
+
+  echo "Verifying checksum..."
+  GOT=$(sha256sum "$TARBALL" | awk '{print $1}')
+  if [ "$GOT" != "$rsrv_sha256" ]; then
+    echo "    expected: $rsrv_sha256"
+    echo "    got:      $GOT"
+    bk_die "Checksum mismatch. Refusing to install."
+  fi
+  echo "    ok: $GOT"
+
+  bk_run tar -xzf "$TARBALL" -C "$WORK"
+  BIN=$(find "$WORK" -type f -name 'rest-server' -perm -u+x | head -n1)
+  [ -n "$BIN" ] || bk_die "No 'rest-server' binary found in the tarball"
+  bk_run install -m 0755 "$BIN" /usr/local/bin/rest-server
+fi
+
+# ---------------------------------------------------------------------------
+# Service account and repository store
+# ---------------------------------------------------------------------------
+if ! getent passwd "$BK_SRV_USER" >/dev/null 2>&1; then
+  echo
+  echo "Creating service account '$BK_SRV_USER'..."
+  bk_run useradd --system --no-create-home --shell /usr/sbin/nologin "$BK_SRV_USER"
+fi
+
+bk_run mkdir -p "$BK_REPOS" "$BK_CONF_DIR"
+bk_run chown -R "$BK_SRV_USER:$BK_SRV_USER" "$BK_REPOS"
+bk_run chmod 700 "$BK_REPOS"
+bk_run chmod 750 "$BK_CONF_DIR"
+
+# ---------------------------------------------------------------------------
+# Credentials
+#
+# Passwords are generated HERE and printed once, so no secret ever travels
+# inbound to this box. Same reasoning as accounts/setpass.
+# ---------------------------------------------------------------------------
+if ! command -v htpasswd >/dev/null 2>&1; then
+  echo
+  echo "Installing apache2-utils for htpasswd..."
+  bk_run apt-get update -qq
+  bk_run apt-get install -y apache2-utils
+fi
+
+[ -f "$BK_HTPASSWD" ] || { touch "$BK_HTPASSWD"; chmod 640 "$BK_HTPASSWD"; }
+
+NEW_CREDS=""
+for u in $BK_USERS; do
+  if grep -q "^$u:" "$BK_HTPASSWD" 2>/dev/null; then
+    echo "  user '$u': already present, credential left alone"
+    continue
+  fi
+  PW=$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 24)
+  htpasswd -b "$BK_HTPASSWD" "$u" "$PW" >/dev/null 2>&1
+  NEW_CREDS="$NEW_CREDS$u	$PW\n"
+  echo "  user '$u': created"
+done
+chown root:"$BK_SRV_USER" "$BK_HTPASSWD"
+chmod 640 "$BK_HTPASSWD"
+
+# ---------------------------------------------------------------------------
+# systemd unit
+# ---------------------------------------------------------------------------
+echo
+echo "Writing $BK_UNIT ..."
+cat > "$BK_UNIT" <<EOF
+[Unit]
+Description=restic REST server (backup-box, append-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$BK_SRV_USER
+Group=$BK_SRV_USER
+ExecStart=/usr/bin/env rest-server \\
+  --path $BK_REPOS \\
+  --listen $LISTEN_ADDR:$BK_PORT \\
+  --htpasswd-file $BK_HTPASSWD \\
+  --append-only \\
+  --private-repos
+Restart=on-failure
+RestartSec=10
+
+# This service handles ciphertext only and needs nothing but its data dir.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$BK_REPOS
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+bk_run systemctl daemon-reload
+bk_run systemctl enable rest-server
+bk_run systemctl restart rest-server
+
+sleep 2
+if ! systemctl is-active --quiet rest-server; then
+  echo
+  echo "Service failed to start. Recent log:"
+  journalctl -u rest-server -n 30 --no-pager | sed 's/^/    /'
+  bk_die "rest-server did not start"
+fi
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+echo
+echo "===================================================================="
+echo "rest-server active on $LISTEN_ADDR:$BK_PORT (append-only, private-repos)"
+echo "===================================================================="
+
+if [ -n "$NEW_CREDS" ]; then
+  echo
+  echo "NEW CREDENTIALS - shown once, not recoverable from this box:"
+  echo
+  printf '%b' "$NEW_CREDS" | while IFS=$'\t' read -r u p; do
+    [ -z "$u" ] && continue
+    echo "    user:     $u"
+    echo "    password: $p"
+    echo "    repo URL: rest:http://$u:$p@$LISTEN_ADDR:$BK_PORT/$u/<repo>"
+    echo
+  done
+  echo "  Put these on the SOURCE host, mode 0600. They are not the restic"
+  echo "  repository password - that is a separate secret which must never"
+  echo "  exist on this machine."
+fi
+
+echo
+echo "Next, from the source host, initialise the repositories:"
+for u in $BK_USERS; do
+  for r in docs mail media; do
+    echo "    restic -r rest:http://$LISTEN_ADDR:$BK_PORT/$u/$r init --repository-version 2"
+  done
+  break
+done
+echo
+echo "Note: repository creation writes new files, which append-only permits."
+echo "      If 'init' is refused, verify the --private-repos path semantics"
+echo "      against this rest-server version before working around it."

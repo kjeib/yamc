@@ -1,0 +1,94 @@
+#!/bin/bash
+# backup-box/status - report the state of a backup box
+#
+# Usage: yamc -h HOST backup-box status
+#
+# Read-only. Note that a box must NEVER be the thing that reports its own
+# backup health - a compromised or wedged box is exactly the one that will
+# claim to be fine. This is an operator convenience for looking at a box you
+# already trust; freshness alarms belong on the source host.
+
+set -e
+
+source "$MOD_DIR/common.sh"
+
+bk_banner status
+
+echo
+echo "--- tunnel ---------------------------------------------------------"
+if ip link show "$BK_IFACE" >/dev/null 2>&1; then
+  ADDR=$(bk_tunnel_addr)
+  echo "  interface $BK_IFACE: up, address ${ADDR:-none}"
+  if command -v wg >/dev/null 2>&1; then
+    wg show "$BK_IFACE" 2>/dev/null | sed 's/^/    /' || echo "    (wg show failed - not root?)"
+  fi
+else
+  echo "  interface $BK_IFACE: NOT PRESENT"
+  echo "    The tunnel is down. Run wg-peer, or check wg-quick@$BK_IFACE."
+fi
+
+echo
+echo "--- storage --------------------------------------------------------"
+if bk_mount_ready; then
+  df -h "$BK_MOUNT" | sed 's/^/  /'
+  if [ -d "$BK_REPOS" ]; then
+    echo
+    echo "  repositories under $BK_REPOS:"
+    FOUND=false
+    for d in "$BK_REPOS"/*/*; do
+      [ -d "$d" ] || continue
+      FOUND=true
+      SIZE=$(du -sh "$d" 2>/dev/null | awk '{print $1}')
+      # A restic repository has a 'config' file at its root.
+      if [ -f "$d/config" ]; then
+        NEWEST=$(find "$d" -type f -newer "$d/config" -printf '%T+\n' 2>/dev/null | sort | tail -n1)
+        echo "    ${d#$BK_REPOS/}  $SIZE  last write: ${NEWEST:-unknown}"
+      else
+        echo "    ${d#$BK_REPOS/}  $SIZE  (not initialised - no config file)"
+      fi
+    done
+    [ "$FOUND" = true ] || echo "    (none yet)"
+  fi
+else
+  echo "  $BK_MOUNT is NOT mounted."
+  echo "    Run: yamc -h $(hostname) backup-box storage"
+fi
+
+echo
+echo "--- rest-server ----------------------------------------------------"
+if systemctl list-unit-files rest-server.service >/dev/null 2>&1 \
+   && [ -f "$BK_UNIT" ]; then
+  echo "  service: $(systemctl is-active rest-server)  (enabled: $(systemctl is-enabled rest-server 2>/dev/null))"
+  LISTEN=$(grep -o -- '--listen [^ \\]*' "$BK_UNIT" | awk '{print $2}')
+  echo "  listen:  ${LISTEN:-unknown}"
+  if grep -q -- '--append-only' "$BK_UNIT"; then
+    echo "  mode:    append-only, private-repos"
+  else
+    echo "  mode:    *** NOT APPEND-ONLY *** - history is deletable from here"
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    echo "  sockets:"
+    ss -lntp 2>/dev/null | grep -E "rest-server|:$BK_PORT" | sed 's/^/    /' || echo "    (none listening)"
+  fi
+else
+  echo "  not installed"
+fi
+
+echo
+echo "--- lockdown -------------------------------------------------------"
+if command -v nft >/dev/null 2>&1 && nft list table inet "$BK_NFT_TABLE" >/dev/null 2>&1; then
+  echo "  nftables table 'inet $BK_NFT_TABLE': ACTIVE"
+  if [ -f "$BK_NFT_FILE" ]; then
+    echo "  persistence: $BK_NFT_FILE (survives reboot)"
+  else
+    echo "  persistence: NONE - these rules are temporary and will not survive reboot"
+  fi
+else
+  echo "  nftables table 'inet $BK_NFT_TABLE': not applied"
+fi
+
+SSHD_LISTEN=$(grep -E '^\s*ListenAddress' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+echo "  sshd ListenAddress: ${SSHD_LISTEN:-all interfaces}"
+
+echo
+echo "===================================================================="

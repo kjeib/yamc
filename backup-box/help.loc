@@ -1,0 +1,109 @@
+#!/bin/bash
+# backup-box/help.loc - Module-specific help
+
+cat <<'EOF'
+Module: backup-box - offsite backup box holding ciphertext only
+
+  Provisions a box that lives on someone else's network and stores encrypted
+  restic repositories it has no key for and cannot read.
+
+  RETURNING COLD? Read backup-box/README.md first - it is the design document
+  for the whole backup system, not just this module. Short version:
+
+    - The SOURCE encrypts before anything leaves the LAN. The repository
+      password never exists on this box, so a stolen or rooted box reveals
+      nothing: no contents, no filenames, no directory structure.
+    - The box cannot reach the LAN. It gets a /32 on both ends of the tunnel
+      and the hub drops every connection it originates. The source always
+      initiates, so that policy has zero exceptions.
+    - There is NO full-disk encryption, deliberately. It would protect only
+      revocable credentials, at the cost of a box that cannot reboot
+      unattended. See README.md.
+    - rest-server runs --append-only, so a compromised box cannot destroy
+      backup history.
+
+SUBCOMMANDS
+
+  storage                        Claim unallocated volume-group space for the
+                                 backup volume. Reports first; acts on -e yes=1.
+      yamc -h HOST backup-box storage
+      yamc -h HOST backup-box storage -e yes=1
+      yamc -h HOST backup-box storage -e bk_vg=ubuntu-vg -e bk_size=95%FREE
+
+  setup                          Install rest-server, create repositories and
+                                 credentials. Prints new passwords ONCE.
+      yamc -h HOST backup-box -e bk_users=uranus
+      yamc -h HOST backup-box -e bk_users="uranus sun" -e yes=1
+
+  lockdown                       Egress policy. RUN THIS LAST - it is the step
+                                 that can lock you out. Auto-reverts after 60s
+                                 unless -e permanent=1.
+      yamc -h HOST backup-box lockdown
+      yamc -h HOST backup-box lockdown -e yes=1
+      yamc -h HOST backup-box lockdown -e yes=1 -e permanent=1
+
+  status                         Tunnel, storage, service, repositories, rules.
+      yamc -h HOST backup-box status
+
+CONFIRMATION MODEL
+
+  Anything destructive or lockout-prone prints its full plan, then:
+
+    -e yes=1 given      proceed without asking
+    terminal available  prompt
+    no terminal         refuse (yamcity redirects stdin from /dev/null, so a
+                        prompt there would read EOF and silently proceed)
+
+  The plan is printed by the same code path that does the work, so a report
+  cannot drift out of sync with the action.
+
+PARAMETERS
+
+  bk_mount    /srv/backup     mount point for the repository volume
+  bk_vg       autodetected    volume group (refuses if ambiguous)
+  bk_lv       backup          logical volume name
+  bk_size     100%FREE        lvcreate -l argument
+  bk_fstype   ext4            filesystem (ext4 gets -m 0: no root reserve)
+  bk_iface    bk0             tunnel interface
+  bk_addr     from bk_iface   bind address for rest-server
+  bk_port     8000            rest-server port
+  bk_users    (required)      rest-server users, one per source host
+
+DEPLOYMENT ORDER
+
+  Full procedure in README.md. The parts people skip and regret:
+
+    - SEED ON SITE, at LAN speed. Terabytes over a residential uplink is not
+      a first run, it is a month.
+    - TUNNEL TEST FROM A FOREIGN NETWORK before the box leaves. Tether it to
+      a phone hotspot and confirm an unattended tunnel and a real backup.
+      Otherwise the first genuine test of dial-out happens somewhere you
+      cannot reach.
+    - Run 'lockdown' LAST, after the tunnel is proven from the final site.
+    - KEEP THE EXISTING RSYNC MIRROR until you have restored something real.
+
+SAFETY
+
+  'storage' is the only part that can destroy data, and is deliberately timid:
+
+    - reports by default, acts only on explicit confirmation
+    - refuses if the logical volume already exists - never reuses, never
+      reformats
+    - mkfs only ever runs on an LV created in the same invocation, and only
+      after blkid confirms it is blank
+    - never extends, resizes or touches the root LV
+    - refuses and reports on anything unexpected rather than getting clever
+
+VERIFICATION IS NOT OPTIONAL
+
+  An encrypted repository is opaque: a silently failed backup looks exactly
+  like a working one. Freshness alarms and 'restic check' belong on the
+  SOURCE host - a compromised box is precisely the one that will report
+  itself healthy. 'backup-box status' is an operator convenience, not a
+  health check.
+
+SEE ALSO
+
+  wg-hub    hub side of the tunnel
+  wg-peer   spoke side of the tunnel
+EOF

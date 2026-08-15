@@ -1,0 +1,145 @@
+#!/bin/bash
+# backup-box/lockdown - egress policy and service binding for a box that is
+# about to sit on a network you do not control.
+#
+# Usage:
+#   yamc -h HOST backup-box lockdown                    # report
+#   yamc -h HOST backup-box lockdown -e yes=1           # apply, AUTO-REVERTS
+#   yamc -h HOST backup-box lockdown -e yes=1 -e permanent=1   # persist
+#
+# THIS IS THE STEP THAT CAN LOCK YOU OUT. By default the ruleset is applied
+# with an automatic revert after $revert_after seconds; if you lose access, do
+# nothing and it undoes itself. Re-run with -e permanent=1 once you have
+# confirmed you still have a working connection.
+#
+# Run this LAST - after the box is at its final location and the tunnel has
+# been proven from there. See README.md, Deployment Procedure.
+
+set -e
+
+source "$MOD_DIR/common.sh"
+
+bk_banner lockdown
+bk_need_root
+
+REVERT_AFTER="${revert_after:-60}"
+PERMANENT="${permanent:-0}"
+
+command -v nft >/dev/null 2>&1 || {
+  echo "Installing nftables..."
+  apt-get update -qq
+  apt-get install -y nftables
+}
+
+LISTEN_ADDR=$(bk_tunnel_addr)
+[ -n "$LISTEN_ADDR" ] || bk_die "Tunnel interface '$BK_IFACE' has no address. Refusing to lock down a box whose tunnel is down."
+
+# The hub endpoint this box must always be able to reach outbound. Read from
+# the running WireGuard config so it cannot drift from what the tunnel uses.
+WG_EP=$(wg show "$BK_IFACE" endpoints 2>/dev/null | awk '{print $2}' | head -n1)
+WG_PORT="${WG_EP##*:}"
+[ -n "$WG_PORT" ] || WG_PORT=51822
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+echo
+echo "PLAN - nftables table 'inet $BK_NFT_TABLE':"
+echo
+echo "  INPUT   accept  established,related"
+echo "          accept  loopback"
+echo "          accept  $BK_IFACE : tcp 22 (ssh), tcp $BK_PORT (rest-server)"
+echo "          DROP    everything else, including all of the local network"
+echo
+echo "  OUTPUT  accept  established,related"
+echo "          accept  loopback"
+echo "          accept  udp dport $WG_PORT        (the tunnel)"
+echo "          accept  udp dport 53, 123         (dns, ntp)"
+echo "          accept  tcp dport 80, 443         (package updates)"
+echo "          DROP    everything else"
+echo
+echo "  A rooted attacker can remove these rules. They stop accidental"
+echo "  leakage and non-root compromise, not a determined intruder. The"
+echo "  isolation that actually matters is enforced at the hub."
+echo
+if [ "$PERMANENT" = "1" ]; then
+  echo "  -e permanent=1 : rules will PERSIST across reboot. No auto-revert."
+else
+  echo "  Rules will AUTO-REVERT after ${REVERT_AFTER}s unless -e permanent=1."
+  echo "  If you lose your connection, wait - it undoes itself."
+fi
+
+bk_confirm "apply the lockdown ruleset" || exit 1
+
+# ---------------------------------------------------------------------------
+# Build the ruleset
+#
+# A table of its own, named, so it is auditable and cannot be confused with
+# Docker's chains or anything else on the box.
+# ---------------------------------------------------------------------------
+RULES=$(cat <<EOF
+table inet $BK_NFT_TABLE {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    ct state established,related accept
+    ct state invalid drop
+    iif lo accept
+    iifname "$BK_IFACE" tcp dport 22 accept
+    iifname "$BK_IFACE" tcp dport $BK_PORT accept
+    iifname "$BK_IFACE" icmp type echo-request accept
+  }
+  chain output {
+    type filter hook output priority 0; policy drop;
+    ct state established,related accept
+    oif lo accept
+    udp dport $WG_PORT accept
+    udp dport { 53, 123 } accept
+    tcp dport { 53, 80, 443 } accept
+    oifname "$BK_IFACE" accept
+    icmp type echo-request accept
+  }
+}
+EOF
+)
+
+echo
+echo "Applying..."
+nft delete table inet "$BK_NFT_TABLE" 2>/dev/null || true
+echo "$RULES" | nft -f -
+echo "    table 'inet $BK_NFT_TABLE' applied"
+
+if [ "$PERMANENT" = "1" ]; then
+  mkdir -p "$(dirname "$BK_NFT_FILE")"
+  echo "$RULES" > "$BK_NFT_FILE"
+  # Ensure the persistent config includes our file.
+  if ! grep -q "$(dirname "$BK_NFT_FILE")" /etc/nftables.conf 2>/dev/null; then
+    echo "include \"$(dirname "$BK_NFT_FILE")/*.nft\"" >> /etc/nftables.conf
+  fi
+  bk_run systemctl enable nftables
+  echo
+  echo "===================================================================="
+  echo "Lockdown PERMANENT. Rules persist across reboot."
+  echo "  ruleset: $BK_NFT_FILE"
+  echo "  remove:  nft delete table inet $BK_NFT_TABLE && rm $BK_NFT_FILE"
+  echo "===================================================================="
+else
+  # Detach a reverter that survives this SSH session ending.
+  setsid nohup bash -c "sleep $REVERT_AFTER; nft delete table inet $BK_NFT_TABLE" \
+    >/dev/null 2>&1 < /dev/null &
+  echo
+  echo "===================================================================="
+  echo "Lockdown applied, REVERTING in ${REVERT_AFTER}s."
+  echo
+  echo "  Confirm you still have access, then make it permanent:"
+  echo "    yamc -h $(hostname) backup-box lockdown -e yes=1 -e permanent=1"
+  echo
+  echo "  To revert right now:"
+  echo "    nft delete table inet $BK_NFT_TABLE"
+  echo "===================================================================="
+fi
+
+echo
+echo "Note: sshd is NOT rebound by this script. Binding it to $LISTEN_ADDR only"
+echo "      is the final, irreversible-from-here step - do it by hand once you"
+echo "      are certain, by setting in /etc/ssh/sshd_config:"
+echo "        ListenAddress $LISTEN_ADDR"
