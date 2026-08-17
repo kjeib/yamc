@@ -1,0 +1,141 @@
+#!/bin/bash
+# system/help.loc - Module-specific help
+#
+# Lists the layers actually present in the resources directory, so the help
+# reflects this site rather than an example.
+
+cat <<'EOF'
+Module: system - deploy system files, edits and hooks
+
+  Three different jobs, which is why the directory layout looks the way it
+  does:
+
+    COPY   files you own outright        -> /etc/issue, /usr/local/bin/*
+    EDIT   files the DISTRO owns         -> /etc/ssh/sshd_config, /etc/bash.bashrc
+    HOOK   actions, not files            -> systemctl restart, update-ca-certificates
+
+  Edits exist because wholesale-replacing a distro-managed file forks it
+  against every future Ubuntu release. You want to append two lines to
+  sshd_config, not maintain your own copy of it forever.
+
+  __edits__ and __hooks__ are EXECUTED, never installed on the target. They
+  are staged to a temp dir, run, and discarded. The __*__ naming is exactly
+  what excludes them from the copy manifest.
+
+LAYERS
+
+  Configuration is split into ADDITIVE layers. Each file belongs to exactly
+  one layer; a host gets the union of the layers it asks for.
+
+  Layers are named for WHAT MUST BE TRUE for their contents to do anything,
+  which makes membership obvious when you add a file:
+
+    base       a POSIX shell, nothing more - safe on headless hosts
+    desktop    X11 / XFCE
+    fleet      the LAN, with other hosts reachable
+    pki        you want the site CA trusted here
+    sshpolicy  you accept the sshd_config relaxation it applies
+
+  Why layers and not profiles (system.foo): yamc profiles are standalone -
+  there is no inheritance from the base (see LOCAL.md). Overlapping profiles
+  would mean duplicated copies of the same file that drift apart. Layers
+  compose, so nothing is ever duplicated. Same idea as 'packages base desktop'.
+
+EOF
+
+# --- Layers actually present at this site ---
+if [ -n "$RES_DIR" ] && [ -d "$RES_DIR" ]; then
+  echo "LAYERS PRESENT  ($RES_DIR)"
+  echo ""
+  found=0
+  for d in "$RES_DIR"/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    case "$name" in __*__) continue ;; esac
+    found=1
+    files=$(find "$d" -type f ! -path '*/__*__/*' 2>/dev/null | wc -l | tr -d ' ')
+    edits=$(find "$d/__edits__" -maxdepth 1 -name '*.sed' -type f 2>/dev/null | wc -l | tr -d ' ')
+    hooks=$(find "$d/__hooks__" -maxdepth 1 -name '*.sh' -type f 2>/dev/null | wc -l | tr -d ' ')
+    printf '  %-12s %2s files, %2s edits, %2s hooks\n' "$name" "$files" "$edits" "$hooks"
+  done
+
+  if [ "$found" -eq 0 ]; then
+    if [ -d "$RES_DIR/etc" ] || [ -d "$RES_DIR/usr" ] || \
+       [ -d "$RES_DIR/__edits__" ] || [ -d "$RES_DIR/__hooks__" ]; then
+      echo "  (none - this tree still uses the old FLAT layout)"
+      echo ""
+      echo "  It will still deploy: the module detects a flat tree and treats"
+      echo "  it as one layer. Split it into <layer>/ subdirectories when"
+      echo "  convenient - see system/README.md."
+    else
+      echo "  (none)"
+    fi
+  fi
+  echo ""
+else
+  echo "  No resources directory. Use -r <path> or set YAMC_RESOURCES."
+  echo ""
+fi
+
+cat <<'EOF'
+SUBCOMMANDS
+
+  setup [layer ...]              Deploy the named layers. Defaults to 'base'.
+      yamc -h HOST -u root system                       # base only
+      yamc -h HOST -u root system base desktop          # several at once
+      yamc -h HOST -u root system base pki sshpolicy fleet
+
+  Layers not found are reported as warnings and skipped; the available ones
+  are listed. If nothing at all resolves, the run fails rather than silently
+  deploying an empty set.
+
+WHAT HAPPENS ON THE TARGET
+
+  1. COPY   <layer>/path/to/file  ->  /path/to/file
+            mode 755 for */bin/*, */sbin/* and *.sh, otherwise 644
+            owned root:root
+
+  2. EDIT   <layer>/__edits__/*.sed applied with 'sed -i' to the target named
+            in the file's own '#@target:' header (first line).
+            The target is backed up to <target>.orig once, the first time.
+            A missing target is a warning, not a failure.
+
+  3. HOOK   <layer>/__hooks__/*.sh executed as root, then discarded.
+            A non-zero exit is a warning, not a failure.
+
+  Order matters and is guaranteed: all copies, then all edits, then all
+  hooks. That is what lets a hook act on something a copy just placed - the
+  pki layer drops a certificate into /usr/local/share/ca-certificates/ and
+  its hook then runs update-ca-certificates to rebuild the bundle.
+
+CAUTION: SED SCRIPTS MUST BE IDEMPOTENT
+
+  Edits are re-applied on EVERY run. A bare append doubles its own output
+  each time. Delete first, then append:
+
+    #@target: /etc/some/config
+    /^MySetting=/d
+    $ a\
+    MySetting=value
+
+  That is why the .sed files look the way they do - the leading /d lines are
+  not tidying, they are what makes re-running safe.
+
+  Two layers may both ship a file of the same name; staged copies are
+  prefixed with the layer name internally, so they cannot clobber each other.
+
+CHOOSING LAYERS FOR A NEW HOST
+
+  workstation    every layer (profiles/workstation, via profiles/subserver)
+  sub-server     base pki sshpolicy fleet
+  minimal or
+  untrusted box  base alone - no CA, no sshd relaxation, no LAN tooling
+
+  An offsite backup box takes 'base'. Deliberately: it should carry nothing
+  that assumes a desktop, your LAN, or your trust anchors.
+
+SEE ALSO
+
+  system/README.md    layer rationale and full directory layout
+  LOCAL.md            resources, RES_DIR and why profiles are standalone
+EOF

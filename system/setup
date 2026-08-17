@@ -1,13 +1,17 @@
 #!/bin/bash
 # system/setup - Deploy system files to remote Ubuntu system
 #
-# Copies files from yamc.local/system/ preserving structure
-# Applies sed edits from __edits__/*.sed files
-# Runs hooks from __hooks__/*.sh
+# Copies files from yamc.local/system/<layer>/ preserving structure
+# Applies sed edits from <layer>/__edits__/*.sed files
+# Runs hooks from <layer>/__hooks__/*.sh
+#
+# Layers are additive - see setup.loc and README.md. The manifests are built
+# locally; this script just executes them.
 
 set -e
 
 echo "===== Deploying System Files ====="
+[ -n "$SYSTEM_LAYERS" ] && echo "Layers: $SYSTEM_LAYERS"
 
 # Check for manifest
 MANIFEST="$MOD_TMP/manifest.txt"
@@ -23,10 +27,15 @@ if [ -f "$MANIFEST" ] && [ -s "$MANIFEST" ]; then
   echo ""
   echo "Copying files..."
   
-  while IFS= read -r relpath || [ -n "$relpath" ]; do
+  while IFS='|' read -r layer relpath || [ -n "$layer" ]; do
     [ -z "$relpath" ] && continue
-    
-    src="$RES_DIR/$relpath"
+
+    # The old flat layout has no layer directory between RES_DIR and the file.
+    if [ "$SYSTEM_FLAT_LAYOUT" = "true" ]; then
+      src="$RES_DIR/$relpath"
+    else
+      src="$RES_DIR/$layer/$relpath"
+    fi
     dest="/$relpath"
     destdir=$(dirname "$dest")
     
@@ -46,7 +55,7 @@ if [ -f "$MANIFEST" ] && [ -s "$MANIFEST" ]; then
         ;;
     esac
     
-    echo "  $relpath -> $dest (mode $mode)"
+    echo "  [$layer] $relpath -> $dest (mode $mode)"
     cp "$src" "$dest"
     chmod "$mode" "$dest"
     chown root:root "$dest"
@@ -115,6 +124,7 @@ fi
 # --- Summary ---
 echo ""
 echo "===== System Deployment Summary ====="
+[ -n "$SYSTEM_LAYERS" ] && echo "Layers:       $SYSTEM_LAYERS"
 echo "Files copied: $COPIED"
 echo "Files edited: $EDITED"
 

@@ -1,95 +1,158 @@
 #!/bin/bash
 # system/setup.loc - Prepare system files for deployment
 #
-# Copies files from yamc.local/system/ to remote system
-# Applies sed edits from yamc.local/system/__edits__/
-# Runs hooks from yamc.local/system/__hooks__/
+# Usage: yamc -h host -u root system [layer ...]
+# Examples:
+#   yamc -h host -u root system                    # 'base' layer
+#   yamc -h host -u root system base desktop       # several layers at once
+#
+# Layers live in yamc.local/system/<layer>/ and are ADDITIVE: each file
+# belongs to exactly one layer, and a host gets the union of the layers it
+# asks for. This replaces profiles (system.foo) for this module, because yamc
+# profiles are standalone - overlapping profiles would mean duplicated files
+# that drift apart.
+#
+# Within a layer:
+#   <layer>/path/to/file    copied to /path/to/file on the target
+#   <layer>/__edits__/*.sed sed scripts applied to a file already on the target
+#   <layer>/__hooks__/*.sh  scripts executed on the target, then discarded
 
-SYSTEM_DIR="$RES_DIR"
-
-if [ ! -d "$SYSTEM_DIR" ]; then
-  echo "ERROR: No system directory found at $RES_DIR"
+if [ -z "$RES_DIR" ]; then
+  echo "ERROR: No resources directory. Use -r <path> or set YAMC_RESOURCES"
   exit 1
 fi
+
+# Default to 'base' if no layer specified
+if [ $# -eq 0 ]; then
+  LAYERS="base"
+else
+  LAYERS="$*"
+fi
+
+echo "System layers requested: $LAYERS"
 
 # Ensure MOD_TMP is absolute
 MOD_TMP_ABS="$(cd "$MOD_TMP" && pwd)"
 
-# Count what we're deploying
+MANIFEST="$MOD_TMP_ABS/manifest.txt"
+EDITS_MANIFEST="$MOD_TMP_ABS/edits.txt"
+HOOKS_MANIFEST="$MOD_TMP_ABS/hooks.txt"
+> "$MANIFEST"
+> "$EDITS_MANIFEST"
+> "$HOOKS_MANIFEST"
+
 FILE_COUNT=0
 EDIT_COUNT=0
 HOOK_COUNT=0
+MISSING_LAYERS=""
 
-# Find files to copy (exclude __*__ directories)
-if [ -d "$SYSTEM_DIR" ]; then
-  # Create manifest of files to copy
-  MANIFEST="$MOD_TMP_ABS/manifest.txt"
-  > "$MANIFEST"
-  
-  # Use subshell to avoid changing directory in main shell
-  (
-    cd "$SYSTEM_DIR"
-    find . -type f ! -path './__*__/*' | while read -r file; do
-      # Strip leading ./
-      relpath="${file#./}"
-      echo "$relpath"
+# ---------------------------------------------------------------------------
+# Backward compatibility: a pre-layer yamc.local/system/ has its files at the
+# top level rather than under a layer directory. Detect that once, so an
+# un-migrated resources tree keeps working instead of silently deploying
+# nothing.
+# ---------------------------------------------------------------------------
+FLAT_LAYOUT=false
+if [ ! -d "$RES_DIR/base" ] && \
+   { [ -d "$RES_DIR/__edits__" ] || [ -d "$RES_DIR/__hooks__" ] || \
+     [ -d "$RES_DIR/etc" ] || [ -d "$RES_DIR/usr" ]; }; then
+  FLAT_LAYOUT=true
+  echo ""
+  echo "NOTE: $RES_DIR uses the old flat layout (no layer directories)."
+  echo "      Treating the whole tree as one layer. Consider splitting it into"
+  echo "      <layer>/ subdirectories - see system/README.md."
+  echo ""
+fi
+
+for layer in $LAYERS; do
+  if [ "$FLAT_LAYOUT" = true ]; then
+    LAYER_DIR="$RES_DIR"
+  else
+    LAYER_DIR="$RES_DIR/$layer"
+  fi
+
+  if [ ! -d "$LAYER_DIR" ]; then
+    echo "WARNING: Layer not found: $LAYER_DIR"
+    MISSING_LAYERS="$MISSING_LAYERS $layer"
+    continue
+  fi
+
+  echo ""
+  echo "Layer: $layer"
+
+  # --- Files to copy (everything except __*__ directories) ---
+  LAYER_FILES=0
+  while IFS= read -r relpath; do
+    [ -z "$relpath" ] && continue
+    echo "$layer|$relpath" >> "$MANIFEST"
+    FILE_COUNT=$((FILE_COUNT + 1))
+    LAYER_FILES=$((LAYER_FILES + 1))
+  done < <(cd "$LAYER_DIR" && find . -type f ! -path './__*__/*' | sed 's|^\./||')
+
+  echo "  Files: $LAYER_FILES"
+
+  # --- Sed edits ---
+  if [ -d "$LAYER_DIR/__edits__" ]; then
+    for sedfile in "$LAYER_DIR/__edits__"/*.sed; do
+      [ -f "$sedfile" ] || continue
+
+      # Extract target from first line: #@target: /path/to/file
+      target=$(head -1 "$sedfile" | grep '^#@target:' | sed 's/^#@target:[[:space:]]*//')
+      if [ -z "$target" ]; then
+        echo "  WARNING: No #@target: header in $(basename "$sedfile"), skipping"
+        continue
+      fi
+
+      # Stage under a layer-prefixed name so two layers can both ship, say,
+      # an sshd.sed without one clobbering the other.
+      staged="${layer}__$(basename "$sedfile")"
+      cp "$sedfile" "$MOD_TMP_ABS/$staged"
+      echo "$staged|$target" >> "$EDITS_MANIFEST"
+
+      echo "  Edit: $(basename "$sedfile") -> $target"
+      EDIT_COUNT=$((EDIT_COUNT + 1))
     done
-  ) > "$MANIFEST"
-  
-  FILE_COUNT=$(wc -l < "$MANIFEST" | tr -d ' ')
-  echo "Files to copy: $FILE_COUNT"
+  fi
+
+  # --- Hooks ---
+  if [ -d "$LAYER_DIR/__hooks__" ]; then
+    for hook in "$LAYER_DIR/__hooks__"/*.sh; do
+      [ -f "$hook" ] || continue
+
+      staged="${layer}__$(basename "$hook")"
+      cp "$hook" "$MOD_TMP_ABS/$staged"
+      echo "$staged" >> "$HOOKS_MANIFEST"
+
+      echo "  Hook: $(basename "$hook")"
+      HOOK_COUNT=$((HOOK_COUNT + 1))
+    done
+  fi
+
+  [ "$FLAT_LAYOUT" = true ] && break
+done
+
+if [ -n "$MISSING_LAYERS" ]; then
+  echo ""
+  echo "Missing layers:$MISSING_LAYERS"
+  echo "Available layers in $RES_DIR:"
+  find "$RES_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '__*__' -printf '  %f\n' 2>/dev/null \
+    || echo "  (none)"
 fi
 
-# Find edit scripts
-EDITS_DIR="$SYSTEM_DIR/__edits__"
-EDITS_MANIFEST="$MOD_TMP_ABS/edits.txt"
-> "$EDITS_MANIFEST"
-
-if [ -d "$EDITS_DIR" ]; then
-  for sedfile in "$EDITS_DIR"/*.sed; do
-    [ -f "$sedfile" ] || continue
-    
-    # Extract target from first line: #@target: /path/to/file
-    target=$(head -1 "$sedfile" | grep '^#@target:' | sed 's/^#@target:[[:space:]]*//')
-    
-    if [ -z "$target" ]; then
-      echo "WARNING: No #@target: header in $(basename "$sedfile"), skipping"
-      continue
-    fi
-    
-    bname=$(basename "$sedfile")
-    echo "$bname|$target" >> "$EDITS_MANIFEST"
-    
-    # Copy sed file to temp
-    cp "$sedfile" "$MOD_TMP_ABS/$bname"
-    
-    echo "  Edit: $bname -> $target"
-    EDIT_COUNT=$((EDIT_COUNT + 1))
-  done
-  echo "Edits to apply: $EDIT_COUNT"
+if [ "$FILE_COUNT" -eq 0 ] && [ "$EDIT_COUNT" -eq 0 ] && [ "$HOOK_COUNT" -eq 0 ]; then
+  echo ""
+  echo "ERROR: Nothing to deploy for layers: $LAYERS"
+  exit 1
 fi
 
-# Find hooks
-HOOKS_DIR="$SYSTEM_DIR/__hooks__"
-HOOKS_MANIFEST="$MOD_TMP_ABS/hooks.txt"
-> "$HOOKS_MANIFEST"
+echo ""
+echo "Total: $FILE_COUNT files, $EDIT_COUNT edits, $HOOK_COUNT hooks"
 
-if [ -d "$HOOKS_DIR" ]; then
-  for hook in "$HOOKS_DIR"/*.sh; do
-    [ -f "$hook" ] || continue
-    
-    bname=$(basename "$hook")
-    echo "$bname" >> "$HOOKS_MANIFEST"
-    cp "$hook" "$MOD_TMP_ABS/$bname"
-    
-    echo "  Hook: $bname"
-    HOOK_COUNT=$((HOOK_COUNT + 1))
-  done
-  echo "Hooks to run: $HOOK_COUNT"
-fi
-
-# Export counts
-echo "FILE_COUNT=$FILE_COUNT" >> "$MOD_TMP_ABS/env"
-echo "EDIT_COUNT=$EDIT_COUNT" >> "$MOD_TMP_ABS/env"
-echo "HOOK_COUNT=$HOOK_COUNT" >> "$MOD_TMP_ABS/env"
-
+# Export counts and the layer list for the remote script
+{
+  echo "FILE_COUNT=$FILE_COUNT"
+  echo "EDIT_COUNT=$EDIT_COUNT"
+  echo "HOOK_COUNT=$HOOK_COUNT"
+  echo "SYSTEM_LAYERS=\"$LAYERS\""
+  echo "SYSTEM_FLAT_LAYOUT=$FLAT_LAYOUT"
+} >> "$MOD_TMP_ABS/env"

@@ -1,38 +1,89 @@
 # system - Generic System File Deployment Module
 
-Deploys system configuration files from `yamc.local/system/` to the remote system,
-applies sed edits, and runs post-deployment hooks.
+Deploys system configuration files from `yamc.local/system/<layer>/` to the
+remote system, applies sed edits, and runs post-deployment hooks.
+
+## Layers
+
+Configuration is organised into **additive layers**. Each file belongs to
+exactly one layer, and a host receives the union of the layers it asks for:
+
+```bash
+yamc -h hostname -u root system                    # 'base' (the default)
+yamc -h hostname -u root system base desktop       # several at once
+```
+
+Layers are named by **what must be true for their contents to do anything**,
+which makes membership self-evident when adding a file:
+
+| Layer | Precondition |
+|---|---|
+| `base` | A POSIX shell. Safe on any host, headless included. |
+| `desktop` | X11 / XFCE |
+| `fleet` | The LAN, with other hosts reachable |
+| `pki` | You want the site CA trusted here |
+| `sshpolicy` | You accept the `sshd_config` relaxation it applies |
+
+**Why layers rather than profiles.** yamc profiles (`system.foo`) are
+standalone — LOCAL.md is explicit that there is no inheritance from the base.
+Overlapping profiles would therefore mean duplicated copies of the same file
+that drift apart. Layers compose instead, so nothing is ever duplicated. This
+mirrors how the `packages` module takes list names.
+
+A minimal or untrusted host — an offsite backup box, say — takes `base` alone
+and picks up nothing that assumes a desktop, the LAN, or your trust anchors.
 
 ## Directory Structure
 
 ```
 yamc.local/system/
-├── etc/                         # Files to COPY (mirrors filesystem)
-│   ├── issue
-│   ├── issue.net
-│   └── profile.d/
-│       ├── local.sh
-│       └── umask.sh
-├── usr/
-│   └── local/
-│       └── bin/
-│           └── myscript
-├── __edits__/                   # Sed scripts to apply
-│   └── sshd.sed
-└── __hooks__/                   # Post-deploy scripts
-    └── sshd.sh
+├── base/
+│   ├── etc/                     # Files to COPY (mirrors filesystem)
+│   │   ├── issue
+│   │   └── profile.d/
+│   │       ├── local.sh
+│   │       └── umask.sh
+│   ├── usr/local/bin/timetest
+│   ├── __edits__/               # Sed scripts to apply
+│   │   ├── bashrc.sed
+│   │   └── keyboard.sed
+│   └── __hooks__/               # Post-deploy scripts
+│       └── keyboard.sh
+├── desktop/
+│   ├── etc/X11/xorg.conf.d/00-keyboard.conf
+│   ├── etc/profile.d/desktop.sh
+│   ├── usr/local/bin/{libreoffice,become,xloads}
+│   └── __hooks__/{firefox-wm-integration.sh,xfce-snap-launchers.sh}
+├── fleet/
+│   └── usr/local/bin/{wake,susp}
+├── pki/
+│   ├── usr/local/share/ca-certificates/site.crt
+│   └── __hooks__/ca-certificates.sh
+└── sshpolicy/
+    ├── __edits__/sshd.sed
+    └── __hooks__/sshd.sh
 ```
+
+Each layer has its own optional `__edits__/` and `__hooks__/`. Staged files are
+prefixed with the layer name internally, so two layers may both ship an
+`sshd.sed` without one clobbering the other.
+
+### Backward compatibility
+
+A pre-layer tree — files sitting directly under `yamc.local/system/` with no
+layer directories — is detected and treated as a single layer, with a notice.
+Existing resource trees keep working un-migrated.
 
 ## Usage
 
 ```bash
-yamc -h hostname -u root system
+yamc -h hostname -u root system [layer ...]
 ```
 
 ## File Copies
 
-Files in `yamc.local/system/` (excluding `__*__` directories) are copied to the
-same path on the remote system. Directory structure is preserved.
+Files in `yamc.local/system/<layer>/` (excluding `__*__` directories) are copied
+to the same path on the remote system. Directory structure is preserved.
 
 **Permissions:**
 - Files in `*/bin/*`, `*/sbin/*`, or `*.sh` → mode 755
