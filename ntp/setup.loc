@@ -1,23 +1,56 @@
 #!/bin/bash
 # ntp/setup.loc - Prepare NTP configuration locally
 #
-# Checks for site-specific NTP server in yamc.local/ntp/config.conf
+# Reads site config from yamc.local/ntp/config.conf:
+#
+#   NTP_SERVERS="ntp1.example.com ntp2.example.com"   preferred time sources
+#   NTP_SERVER=ntp.example.com                        legacy singular form
+#   NTP_POOL=pool.example.org                         override the fallback pool
+#   NTP_IS_SERVER=true                                also serve time
+#   NTP_ALLOW="192.168.0.0/16"                        who may ask (server only)
+#   NTP_LOCAL_STRATUM=10                              serve even when unsynced
+#
+# This module is for ON-LAN hosts. It points them at a local time server while
+# leaving the distribution's public pool in place as a fallback, so the loss of
+# one local server does not leave every host with no time source at all.
 
-# Look for site-specific config
 if [ -f "$RES_DIR/config.conf" ]; then
-  echo "Found site-specific NTP config"
+  echo "Found site-specific NTP config: $RES_DIR/config.conf"
+  # shellcheck disable=SC1091
   source "$RES_DIR/config.conf"
-  
-  if [ -n "$NTP_SERVER" ]; then
-    echo "Using NTP server: $NTP_SERVER"
-    echo "NTP_SERVER=\"$NTP_SERVER\"" >> "$MOD_TMP/env"
-  fi
 else
-  echo "No site config found, will use system defaults (pool.ntp.org)"
+  echo "No site config found; keeping the distribution's default sources."
 fi
 
-# Check if this should be an NTP server (not just client)
-if [ -n "$NTP_IS_SERVER" ]; then
-  echo "NTP_IS_SERVER=\"$NTP_IS_SERVER\"" >> "$MOD_TMP/env"
+# Accept the legacy singular NTP_SERVER as well as the plural form.
+SERVERS="$NTP_SERVERS"
+if [ -z "$SERVERS" ] && [ -n "$NTP_SERVER" ]; then
+  SERVERS="$NTP_SERVER"
+  echo "Note: NTP_SERVER is the legacy name; NTP_SERVERS accepts a list."
 fi
 
+if [ -n "$SERVERS" ]; then
+  echo "Preferred time servers: $SERVERS"
+else
+  echo "No local time servers configured; the packaged pool will be used alone."
+fi
+
+{
+  echo "NTP_SERVERS=\"$SERVERS\""
+  [ -n "$NTP_POOL" ]          && echo "NTP_POOL=\"$NTP_POOL\""
+  [ -n "$NTP_IS_SERVER" ]     && echo "NTP_IS_SERVER=\"$NTP_IS_SERVER\""
+  [ -n "$NTP_ALLOW" ]         && echo "NTP_ALLOW=\"$NTP_ALLOW\""
+  [ -n "$NTP_LOCAL_STRATUM" ] && echo "NTP_LOCAL_STRATUM=\"$NTP_LOCAL_STRATUM\""
+} >> "$MOD_TMP/env"
+
+if [ "$NTP_IS_SERVER" = "true" ]; then
+  if [ -z "$NTP_ALLOW" ]; then
+    echo ""
+    echo "ERROR: NTP_IS_SERVER=true but NTP_ALLOW is not set."
+    echo "       Specify which networks may query this server, e.g."
+    echo "         NTP_ALLOW=\"192.168.0.0/16\""
+    echo "       (this used to be hardcoded in the module - it is site data)"
+    exit 1
+  fi
+  echo "Will serve time to: $NTP_ALLOW"
+fi

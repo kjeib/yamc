@@ -3,93 +3,215 @@
 #
 # Usage: yamc -h hostname -u root ntp
 #
-# Site config (optional): yamc.local/ntp/config.conf
-#   NTP_SERVER=ntp.example.com    # Custom NTP server
-#   NTP_IS_SERVER=true            # Configure as NTP server (not just client)
+# Intended for ON-LAN hosts: points them at a local time server while leaving
+# the distribution's public pool in place as a fallback.
+#
+# Configuration is written as DROP-IN FILES, not by editing chrony.conf:
+#
+#   /etc/chrony/sources.d/yamc.sources    time sources  (server / pool lines)
+#   /etc/chrony/conf.d/yamc-server.conf   serving time  (allow / local stratum)
+#
+# Drop-ins are idempotent by construction, reversible by deleting the file, and
+# survive chrony package upgrades - none of which was true of the sed edits
+# this module used to make.
 
 set -e
 
 echo "===== Configuring NTP (chrony) ====="
 
-# Install chrony if not present
-if ! command -v chronyd &> /dev/null; then
-  echo "Installing chrony..."
+CHRONY_CONF="/etc/chrony/chrony.conf"
+SOURCES_DIR="/etc/chrony/sources.d"
+CONFD_DIR="/etc/chrony/conf.d"
+SOURCES_FILE="$SOURCES_DIR/yamc.sources"
+SERVER_FILE="$CONFD_DIR/yamc-server.conf"
+
+NTP_LOCAL_STRATUM="${NTP_LOCAL_STRATUM:-10}"
+NEED_RESTART=false
+
+# ---------------------------------------------------------------------------
+# Install
+#
+# Note that the chrony package displaces systemd-timesyncd. That is a daemon
+# swap, not just a configuration change, so say so rather than letting it
+# happen silently.
+# ---------------------------------------------------------------------------
+if ! command -v chronyd >/dev/null 2>&1; then
+  echo "Installing chrony (this replaces systemd-timesyncd as the time daemon)..."
   apt-get update -qq
   apt-get install -y chrony
+  NEED_RESTART=true
 else
   echo "chrony is already installed"
 fi
 
-# Configuration file location
-CHRONY_CONF="/etc/chrony/chrony.conf"
+[ -f "$CHRONY_CONF" ] || { echo "ERROR: $CHRONY_CONF not found"; exit 1; }
 
-if [ ! -f "$CHRONY_CONF" ]; then
-  echo "ERROR: chrony config not found at $CHRONY_CONF"
-  exit 1
-fi
-
-# Backup original config if not already backed up
 if [ ! -f "$CHRONY_CONF.orig" ]; then
   cp "$CHRONY_CONF" "$CHRONY_CONF.orig"
   echo "Backed up original config to $CHRONY_CONF.orig"
 fi
 
-# Configure custom NTP server if specified
-if [ -n "$NTP_SERVER" ]; then
-  echo "Configuring custom NTP server: $NTP_SERVER"
-  
-  # Check if already configured
-  if grep -q "^server $NTP_SERVER" "$CHRONY_CONF"; then
-    echo "NTP server $NTP_SERVER already configured"
-  else
-    # Comment out default pool servers and add our server
-    sed -i 's/^pool /#pool /' "$CHRONY_CONF"
-    
-    # Add our server at the top of the file (after any comments)
-    if ! grep -q "^server $NTP_SERVER" "$CHRONY_CONF"; then
-      # Find first non-comment line and insert before it
-      sed -i "0,/^[^#]/{s/^[^#]/server $NTP_SERVER iburst\n&/}" "$CHRONY_CONF"
-      echo "Added server $NTP_SERVER to config"
-    fi
+# ---------------------------------------------------------------------------
+# Refuse to layer on top of the old in-place edits.
+#
+# Earlier versions of this module edited chrony.conf directly. Adding a
+# drop-in on top of that would define the same server twice and leave the
+# pool lines still commented out, so this stops instead. Fixing it is a
+# separate, explicit operation - 'setup' should not carry preconceptions
+# about how a host might already be broken.
+# ---------------------------------------------------------------------------
+if grep -q '^#pool ' "$CHRONY_CONF"; then
+  echo ""
+  echo "ERROR: $CHRONY_CONF carries the old in-place edits"
+  echo "       (pool lines commented out by a previous version of this module)."
+  echo ""
+  echo "  Layering a drop-in on top would define the same server twice and"
+  echo "  leave this host with no fallback time source."
+  echo ""
+  echo "  Clean it up first, then re-run:"
+  echo "    yamc -h $(hostname) -u root ntp cleanup"
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Ensure the drop-in directories are enabled.
+#
+# Ubuntu's packaged chrony.conf already carries 'confdir' and 'sourcedir'
+# lines. Add them only if genuinely absent - one idempotent append, guarded.
+# ---------------------------------------------------------------------------
+mkdir -p "$SOURCES_DIR" "$CONFD_DIR"
+
+if ! grep -qE "^[[:space:]]*confdir[[:space:]]+.*$CONFD_DIR" "$CHRONY_CONF"; then
+  echo "Enabling confdir $CONFD_DIR in $CHRONY_CONF"
+  echo "confdir $CONFD_DIR" >> "$CHRONY_CONF"
+  NEED_RESTART=true
+fi
+
+if ! grep -qE "^[[:space:]]*sourcedir[[:space:]]+.*$SOURCES_DIR" "$CHRONY_CONF"; then
+  echo "Enabling sourcedir $SOURCES_DIR in $CHRONY_CONF"
+  echo "sourcedir $SOURCES_DIR" >> "$CHRONY_CONF"
+  NEED_RESTART=true
+fi
+
+# ---------------------------------------------------------------------------
+# Time sources
+#
+# 'prefer' makes the local server win whenever it is reachable, so hosts agree
+# with each other. The packaged pool stays in chrony.conf untouched and only
+# matters when the local server is unreachable - which is exactly when it is
+# wanted.
+# ---------------------------------------------------------------------------
+NEW_SOURCES=$(
+  echo "# Managed by yamc: ntp. Edits here are overwritten."
+  echo "# Local servers are 'prefer'; the packaged pool in chrony.conf remains"
+  echo "# as a fallback so a local outage does not leave this host sourceless."
+  for s in $NTP_SERVERS; do
+    echo "server $s iburst prefer"
+  done
+  [ -n "$NTP_POOL" ] && echo "pool $NTP_POOL iburst maxsources 4"
+  true
+)
+
+if [ -z "$NTP_SERVERS" ] && [ -z "$NTP_POOL" ]; then
+  if [ -f "$SOURCES_FILE" ]; then
+    echo ""
+    echo "No sources configured; removing $SOURCES_FILE"
+    rm -f "$SOURCES_FILE"
+    NEED_RESTART=true
   fi
+  echo "Using the distribution's default sources."
 else
-  echo "Using default NTP servers (pool.ntp.org)"
+  if [ -f "$SOURCES_FILE" ] && [ "$(cat "$SOURCES_FILE")" = "$NEW_SOURCES" ]; then
+    echo ""
+    echo "Sources already up to date: $SOURCES_FILE"
+  else
+    echo ""
+    echo "Writing $SOURCES_FILE"
+    echo "$NEW_SOURCES" > "$SOURCES_FILE"
+    chmod 644 "$SOURCES_FILE"
+    sed 's/^/    /' "$SOURCES_FILE"
+  fi
 fi
 
-# Configure as NTP server if requested
+# ---------------------------------------------------------------------------
+# Serving time (optional)
+#
+# 'allow' and 'local stratum' are not source directives, so they belong in
+# conf.d rather than sources.d. conf.d is read at startup only, so any change
+# here needs a restart rather than a source reload.
+# ---------------------------------------------------------------------------
 if [ "$NTP_IS_SERVER" = "true" ]; then
-  echo "Configuring as NTP server..."
-  
-  # Allow local network clients
-  if ! grep -q "^allow 192.168" "$CHRONY_CONF"; then
-    echo "allow 192.168.0.0/16" >> "$CHRONY_CONF"
-    echo "Added allow rule for local network"
+  NEW_SERVER=$(
+    echo "# Managed by yamc: ntp. Edits here are overwritten."
+    echo "allow $NTP_ALLOW"
+    echo "local stratum $NTP_LOCAL_STRATUM"
+  )
+  if [ -f "$SERVER_FILE" ] && [ "$(cat "$SERVER_FILE")" = "$NEW_SERVER" ]; then
+    echo "Server config already up to date: $SERVER_FILE"
+  else
+    echo "Writing $SERVER_FILE (serving time to $NTP_ALLOW)"
+    echo "$NEW_SERVER" > "$SERVER_FILE"
+    chmod 644 "$SERVER_FILE"
+    NEED_RESTART=true
   fi
-  
-  # Serve time even if not synchronized
-  if ! grep -q "^local stratum" "$CHRONY_CONF"; then
-    echo "local stratum 10" >> "$CHRONY_CONF"
-    echo "Added local stratum for serving time"
-  fi
+elif [ -f "$SERVER_FILE" ]; then
+  echo "No longer configured as a time server; removing $SERVER_FILE"
+  rm -f "$SERVER_FILE"
+  NEED_RESTART=true
 fi
 
-# Enable and restart chrony
-echo "Enabling and starting chrony service..."
-systemctl enable chrony
-systemctl restart chrony
-
-# Wait a moment for sync
-sleep 2
-
-# Show status
-echo ""
-echo "Chrony status:"
-chronyc tracking | head -5
+# ---------------------------------------------------------------------------
+# Apply
+#
+# Source changes can be reloaded without disturbing the clock. Anything in
+# conf.d, or a change to chrony.conf itself, needs a restart.
+# ---------------------------------------------------------------------------
+systemctl enable chrony >/dev/null 2>&1 || true
 
 echo ""
-echo "NTP sources:"
-chronyc sources
+if [ "$NEED_RESTART" = true ] || ! systemctl is-active --quiet chrony; then
+  echo "Restarting chrony..."
+  systemctl restart chrony
+else
+  echo "Reloading sources (no restart needed)..."
+  chronyc reload sources >/dev/null 2>&1 || systemctl restart chrony
+fi
+
+if ! systemctl is-active --quiet chrony; then
+  echo "ERROR: chrony is not running"
+  systemctl status chrony --no-pager -l | sed 's/^/    /' || true
+  exit 1
+fi
+
+# Report which time daemon ended up active, since installing chrony displaces
+# systemd-timesyncd and a silent daemon swap is confusing a year later.
+if systemctl is-active --quiet systemd-timesyncd 2>/dev/null; then
+  echo "WARNING: systemd-timesyncd is ALSO active - two time daemons is a bug"
+else
+  echo "systemd-timesyncd: inactive (expected - chrony has taken over)"
+fi
+
+# ---------------------------------------------------------------------------
+# Verify for real.
+#
+# 'sleep 2; chronyc tracking' reported "Not synchronised" most of the time and
+# meant nothing. waitsync blocks until the clock is actually within tolerance
+# and its exit status is meaningful.
+# ---------------------------------------------------------------------------
+echo ""
+echo "Waiting for synchronisation..."
+if chronyc waitsync 10 0.1 >/dev/null 2>&1; then
+  echo "  synchronised"
+else
+  echo "  NOT synchronised within the timeout."
+  echo "  Sources are configured, but the clock has not converged yet. This is"
+  echo "  normal immediately after install; check again with 'ntp status'."
+fi
+
+echo ""
+chronyc tracking 2>/dev/null | sed 's/^/  /' || echo "  (chronyc tracking unavailable)"
+echo ""
+chronyc sources 2>/dev/null | sed 's/^/  /' || echo "  (chronyc sources unavailable)"
 
 echo ""
 echo "===== NTP Configuration Complete ====="
-

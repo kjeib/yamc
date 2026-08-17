@@ -1,0 +1,87 @@
+#!/bin/bash
+# ntp/status - Report time synchronisation state
+#
+# Usage: yamc -h hostname -u root ntp status
+#
+# Read-only. Works whether the host runs chrony (configured by this module) or
+# systemd-timesyncd (the Ubuntu default, which is adequate for hosts that do
+# not need a local time server).
+
+echo "===================================================================="
+echo "NTP status - $(hostname)"
+echo "===================================================================="
+
+echo ""
+echo "--- system clock ---------------------------------------------------"
+timedatectl 2>/dev/null | sed 's/^/  /' || date
+
+echo ""
+echo "--- time daemon ----------------------------------------------------"
+CHRONY_ACTIVE=false
+TIMESYNCD_ACTIVE=false
+systemctl is-active --quiet chrony 2>/dev/null && CHRONY_ACTIVE=true
+systemctl is-active --quiet systemd-timesyncd 2>/dev/null && TIMESYNCD_ACTIVE=true
+
+# 'systemctl is-active' prints a state AND exits non-zero when not running, so
+# a plain '|| echo ...' fallback would emit both. Test for the unit instead.
+svc_state() {
+  local unit="$1" state
+  state=$(systemctl is-active "$unit" 2>/dev/null) || true
+  [ -n "$state" ] || state="unknown"
+  systemctl cat "$unit" >/dev/null 2>&1 || state="not installed"
+  echo "$state"
+}
+
+echo "  chrony:            $(svc_state chrony)"
+echo "  systemd-timesyncd: $(svc_state systemd-timesyncd)"
+
+if [ "$CHRONY_ACTIVE" = true ] && [ "$TIMESYNCD_ACTIVE" = true ]; then
+  echo ""
+  echo "  WARNING: both time daemons are active. They will fight over the"
+  echo "           clock. Disable one - normally systemd-timesyncd, since"
+  echo "           installing chrony is meant to replace it."
+fi
+
+if [ "$CHRONY_ACTIVE" = true ]; then
+  echo ""
+  echo "--- yamc-managed drop-ins ------------------------------------------"
+  for f in /etc/chrony/sources.d/yamc.sources /etc/chrony/conf.d/yamc-server.conf; do
+    if [ -f "$f" ]; then
+      echo "  $f:"
+      grep -v '^#' "$f" | grep -v '^$' | sed 's/^/      /'
+    else
+      echo "  $f: (absent)"
+    fi
+  done
+
+  if grep -q '^#pool ' /etc/chrony/chrony.conf 2>/dev/null; then
+    echo ""
+    echo "  WARNING: chrony.conf still has commented-out 'pool' lines, so this"
+    echo "           host has no fallback if its local server goes away."
+    echo "           Re-run 'yamc -h $(hostname) -u root ntp' to clean that up."
+  fi
+
+  echo ""
+  echo "--- tracking -------------------------------------------------------"
+  chronyc tracking 2>/dev/null | sed 's/^/  /' || echo "  (unavailable)"
+
+  echo ""
+  echo "--- sources --------------------------------------------------------"
+  chronyc sources -v 2>/dev/null | sed 's/^/  /' || echo "  (unavailable)"
+
+elif [ "$TIMESYNCD_ACTIVE" = true ]; then
+  echo ""
+  echo "--- timesyncd ------------------------------------------------------"
+  timedatectl show-timesync --all 2>/dev/null | sed 's/^/  /' \
+    || systemctl status systemd-timesyncd --no-pager -l 2>/dev/null | sed 's/^/  /'
+  echo ""
+  echo "  This host uses the Ubuntu default (SNTP). That is fine for logging"
+  echo "  and for apt's Release-file validity checks. Run the 'ntp' module"
+  echo "  only if it needs a local time server."
+else
+  echo ""
+  echo "  No time daemon is active. The clock will drift."
+fi
+
+echo ""
+echo "===================================================================="

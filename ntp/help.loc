@@ -1,0 +1,59 @@
+#!/bin/bash
+# ntp/help.loc - Module-specific help
+
+cat <<'EOF'
+Module: ntp - time synchronization via chrony
+
+  For ON-LAN hosts. Points them at a local time server while LEAVING the
+  distribution's public pool in place as a fallback, so losing the local
+  server does not leave every host with no time source at all.
+
+  Off-LAN or minimal hosts do not need this module. Ubuntu runs
+  systemd-timesyncd by default, which is accurate enough for logging and for
+  apt's Release-file validity checks. An offsite backup box should skip it.
+
+SUBCOMMANDS
+
+  setup                      Install chrony, write drop-in config, verify sync
+      yamc -h HOST -u root ntp
+
+  status                     Report clock, daemon and sources. Read-only, and
+                             works on timesyncd hosts too.
+      yamc -h HOST -u root ntp status
+
+  cleanup                    Undo the in-place chrony.conf edits made by older
+                             versions of this module. Only needed on hosts
+                             configured before the rewrite; 'setup' refuses to
+                             run until it has been done.
+      yamc -h HOST -u root ntp cleanup
+
+CONFIGURATION  (yamc.local/ntp/config.conf)
+
+  NTP_SERVERS="ntp1 ntp2"    preferred local servers (space-separated)
+  NTP_POOL=pool.ntp.org      override the fallback pool (normally unset)
+  NTP_IS_SERVER=true         also serve time to the network
+  NTP_ALLOW="192.168.0.0/16" REQUIRED when serving - no default
+  NTP_LOCAL_STRATUM=10       stratum to advertise while unsynced
+
+  NTP_SERVER (singular) is still accepted.
+
+HOW CONFIG IS APPLIED
+
+  Drop-in files, not edits to chrony.conf:
+
+    /etc/chrony/sources.d/yamc.sources     server / pool lines
+    /etc/chrony/conf.d/yamc-server.conf    allow / local stratum
+
+  So it is idempotent, reversible by deleting the file, and survives chrony
+  package upgrades. Source changes reload without restarting the daemon;
+  conf.d changes need a restart, and the module does the lesser of the two.
+
+  Local servers get 'prefer', so hosts agree with each other while the
+  packaged pool covers a local outage.
+
+NOTES
+
+  - Installing chrony DISPLACES systemd-timesyncd. That is a daemon swap, not
+    just a config change; the module reports the resulting state.
+  - Original config is preserved as /etc/chrony/chrony.conf.orig
+EOF

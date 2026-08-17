@@ -1,0 +1,74 @@
+#!/bin/bash
+# ntp/cleanup - Undo the in-place chrony.conf edits made by older versions
+#
+# Usage: yamc -h hostname -u root ntp cleanup
+#
+# Older versions of this module configured chrony by editing chrony.conf
+# directly: commenting out the 'pool' lines and inserting a 'server' line.
+# Hosts left in that state have no fallback time source at all if the local
+# server goes away.
+#
+# This restores the packaged config so 'ntp setup' can apply its drop-ins
+# cleanly. Nothing is destroyed - the current file is copied aside first.
+
+set -e
+
+echo "===== NTP legacy cleanup ====="
+
+CHRONY_CONF="/etc/chrony/chrony.conf"
+
+if [ ! -f "$CHRONY_CONF" ]; then
+  echo "chrony is not installed here - nothing to clean up."
+  exit 0
+fi
+
+if ! grep -q '^#pool ' "$CHRONY_CONF"; then
+  echo "No legacy in-place edits found in $CHRONY_CONF."
+  echo "Nothing to do."
+  exit 0
+fi
+
+echo ""
+echo "Legacy edits found (pool lines commented out):"
+grep -nE '^#pool |^server .* iburst$|^allow |^local stratum ' "$CHRONY_CONF" \
+  | sed 's/^/    /' || true
+
+if [ ! -f "$CHRONY_CONF.orig" ]; then
+  echo ""
+  echo "ERROR: no $CHRONY_CONF.orig to restore from."
+  echo ""
+  echo "  Without the packaged original there is nothing to restore to, and"
+  echo "  guessing which lines were the module's would risk removing yours."
+  echo "  Resolve by hand: re-comment nothing, un-comment the 'pool' lines,"
+  echo "  and delete any 'server'/'allow'/'local stratum' lines this module"
+  echo "  added. Then run 'ntp' normally."
+  exit 1
+fi
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+LEGACY_COPY="$CHRONY_CONF.yamc-legacy.$STAMP"
+
+echo ""
+cp "$CHRONY_CONF" "$LEGACY_COPY"
+echo "  saved current config to  : $LEGACY_COPY"
+cp "$CHRONY_CONF.orig" "$CHRONY_CONF"
+echo "  restored packaged config : $CHRONY_CONF.orig -> $CHRONY_CONF"
+
+echo ""
+echo "Restarting chrony..."
+systemctl restart chrony
+sleep 1
+
+if systemctl is-active --quiet chrony; then
+  echo "  chrony is running on the packaged configuration"
+else
+  echo "  ERROR: chrony did not restart"
+  systemctl status chrony --no-pager -l | sed 's/^/    /' || true
+  exit 1
+fi
+
+echo ""
+echo "===== Cleanup complete ====="
+echo "This host is now on the packaged config with its pool restored."
+echo "Apply the local time servers as drop-ins with:"
+echo "    yamc -h $(hostname) -u root ntp"
