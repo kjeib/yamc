@@ -96,7 +96,7 @@ echo "PLAN:"
 echo "    lvcreate -l $BK_SIZE -n $BK_LV $BK_VG"
 echo "    mkfs.$BK_FSTYPE $MKFS_OPTS /dev/$BK_VG/$BK_LV"
 echo "    mkdir -p $BK_MOUNT"
-echo "    add to /etc/fstab by UUID:  $BK_MOUNT  $BK_FSTYPE  defaults,noexec,nodev,nosuid  0 2"
+echo "    add to /etc/fstab by UUID:  $BK_MOUNT  $BK_FSTYPE  defaults,noexec,nodev,nosuid,nofail  0 2"
 echo "    mount $BK_MOUNT"
 echo "    mkdir -p $BK_REPOS"
 echo
@@ -109,7 +109,7 @@ echo "  Note: noexec,nodev,nosuid - this volume holds nothing but opaque blobs."
 echo
 echo "  This does NOT touch the root LV or any existing volume."
 
-bk_confirm "create and mount $BK_MOUNT" || exit 1
+bk_gate "create and mount $BK_MOUNT"
 
 # ---------------------------------------------------------------------------
 # Act. Everything below runs only on the LV we create here, in this run.
@@ -144,8 +144,22 @@ if grep -q "UUID=$UUID" /etc/fstab; then
   echo "    fstab entry already present"
 else
   [ -f /etc/fstab.orig ] || cp /etc/fstab /etc/fstab.orig
-  echo "UUID=$UUID $BK_MOUNT $BK_FSTYPE defaults,noexec,nodev,nosuid 0 2" >> /etc/fstab
+  # nofail: this box will be unreachable and unattended. If the backup volume
+  # ever fails to appear, it must still boot so you can get in and look -
+  # without nofail, systemd drops to an emergency shell and the box is simply
+  # gone. A silently unmounted volume is caught by the source-side freshness
+  # alarm and by 'backup-box status'.
+  echo "UUID=$UUID $BK_MOUNT $BK_FSTYPE defaults,noexec,nodev,nosuid,nofail 0 2" >> /etc/fstab
   echo "    added fstab entry by UUID"
+
+  # systemd generates .mount units from fstab at boot and on daemon-reload.
+  # Without this, its view stays stale for the rest of the session and mount(8)
+  # warns about it. Boot is unaffected either way - the generator re-reads
+  # fstab from scratch - but leaving the running system in a state we just
+  # warned about is sloppy.
+  if command -v systemctl >/dev/null 2>&1; then
+    bk_run systemctl daemon-reload
+  fi
 fi
 
 bk_run mount "$BK_MOUNT"

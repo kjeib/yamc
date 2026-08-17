@@ -69,7 +69,7 @@ else
   echo "  If you lose your connection, wait - it undoes itself."
 fi
 
-bk_confirm "apply the lockdown ruleset" || exit 1
+bk_gate "apply the lockdown ruleset"
 
 # ---------------------------------------------------------------------------
 # Build the ruleset

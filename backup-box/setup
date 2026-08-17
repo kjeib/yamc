@@ -58,7 +58,7 @@ echo
 echo "  Existing users keep their credentials; only missing users are created,"
 echo "  and their generated password is printed ONCE."
 
-bk_confirm "install and configure rest-server" || exit 1
+bk_gate "install and configure rest-server"
 
 # ---------------------------------------------------------------------------
 # Install

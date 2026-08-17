@@ -73,8 +73,11 @@ bk_confirm() {
     case "$reply" in
       [yY]|[yY][eE][sS]) return 0 ;;
     esac
-    echo "Aborted. Nothing was changed."
-    return 1
+    # Declining is a choice, not a failure. Return 2 so the caller can exit 0
+    # and yamc does not report a scary "Remote script execution failed" for
+    # what was a deliberate look-and-decline.
+    echo "Aborted at your request. Nothing was changed."
+    return 2
   fi
 
   echo
@@ -82,6 +85,21 @@ bk_confirm() {
   echo "No terminal available to prompt for confirmation."
   echo "To proceed, re-run with:  -e yes=1"
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# bk_gate "description" - wrap bk_confirm with the right exit semantics.
+#   declined at a prompt -> exit 0 (a decision was made, nothing failed)
+#   no terminal          -> exit 1 (the requested work could not be done)
+# ---------------------------------------------------------------------------
+bk_gate() {
+  local rc=0
+  bk_confirm "$1" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) exit 0 ;;
+    *) exit 1 ;;
+  esac
 }
 
 # Echo a command, then run it.
