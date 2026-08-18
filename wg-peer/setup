@@ -1,0 +1,210 @@
+#!/bin/bash
+# wg-peer/setup - configure the spoke side of a WireGuard network
+#
+# Usage: yamc -h HOST -e net=<name> -e addr=<tunnel-addr> wg-peer [-e yes=1]
+#
+# This machine dials OUT to the hub and keeps the tunnel alive through NAT.
+# The private key is generated here and never leaves; only the public key goes
+# back to you, for pasting into the peer table.
+#
+# 'wg-peer help' prints the manual equivalent of everything below.
+
+set -e
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+
+wg_banner setup
+wg_need_root
+
+BOOTSTRAP=false
+[ -f "$WG_CONF" ] || BOOTSTRAP=true
+
+# ---------------------------------------------------------------------------
+# Report the plan
+# ---------------------------------------------------------------------------
+echo
+echo "PLAN:"
+echo "    interface   : $WG_IFACE"
+echo "    address     : $PEER_ADDR/32"
+echo "    hub         : $WG_HUB_ADDR/32  via $WG_ENDPOINT"
+echo "    keepalive   : 25s   (holds the NAT mapping open from this side)"
+echo "    re-resolve  : every 2 minutes when the handshake goes stale"
+echo
+if [ "$BOOTSTRAP" = true ]; then
+  echo "  New keypair will be generated here; the private half never leaves."
+else
+  echo "  $WG_CONF exists; the existing private key is kept."
+fi
+echo
+echo "  BOTH addresses are /32. This machine's routing table will therefore"
+echo "  contain no route toward the hub's LAN at all - isolation is structural"
+echo "  on this end, not a firewall rule that could be misconfigured. Note that"
+echo "  AllowedIPs = 0.0.0.0/0 would instead route ALL traffic through the"
+echo "  tunnel: right for a laptop on hotel wifi, wrong for this."
+
+wg_gate "configure $WG_IFACE on $(hostname)"
+
+# ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
+if ! command -v wg >/dev/null 2>&1; then
+  echo
+  echo "Installing wireguard-tools..."
+  wg_run apt-get update -qq
+  wg_run apt-get install -y wireguard-tools
+fi
+
+mkdir -p "$WG_DIR"
+chmod 700 "$WG_DIR"
+
+# ---------------------------------------------------------------------------
+# Keypair
+# ---------------------------------------------------------------------------
+if [ ! -f "$WG_KEY" ]; then
+  echo
+  echo "Generating keypair..."
+  ( umask 077; wg genkey > "$WG_KEY" )
+  wg pubkey < "$WG_KEY" > "$WG_PUB"
+  chmod 600 "$WG_KEY"; chmod 644 "$WG_PUB"
+fi
+PEER_PRIV=$(cat "$WG_KEY")
+PEER_PUB=$(cat "$WG_PUB")
+
+# ---------------------------------------------------------------------------
+# Interface config
+# ---------------------------------------------------------------------------
+NEW_CONF=$(
+  echo "# Managed by yamc: wg-peer. Network '$WGNET_NAME'."
+  echo "#"
+  echo "# AllowedIPs is the hub's /32 and nothing else, so this host has no"
+  echo "# route toward the hub's LAN. Do not widen it."
+  echo ""
+  echo "[Interface]"
+  echo "Address    = $PEER_ADDR/32"
+  echo "PrivateKey = $PEER_PRIV"
+  echo ""
+  echo "[Peer]"
+  echo "PublicKey           = $WG_HUB_PUBKEY"
+  echo "Endpoint            = $WG_ENDPOINT"
+  echo "AllowedIPs          = $WG_HUB_ADDR/32"
+  echo "PersistentKeepalive = 25"
+)
+
+if [ -f "$WG_CONF" ] && [ "$(cat "$WG_CONF")" = "$NEW_CONF" ]; then
+  echo
+  echo "Interface config already up to date: $WG_CONF"
+  CONF_CHANGED=false
+else
+  ( umask 077; echo "$NEW_CONF" > "$WG_CONF" )
+  chmod 600 "$WG_CONF"
+  echo
+  echo "Wrote $WG_CONF"
+  CONF_CHANGED=true
+fi
+
+# ---------------------------------------------------------------------------
+# Endpoint re-resolution
+#
+# wg-quick resolves the endpoint hostname ONCE, at interface start. When a
+# dynamic-DNS name changes address the tunnel stays down until something
+# restarts it - on an unattended box at a remote site, that is the failure
+# that matters most, and it is silent.
+#
+# Re-resolve only when the handshake has actually gone stale, so a working
+# tunnel is never disturbed.
+# ---------------------------------------------------------------------------
+cat > "$RERESOLVE_BIN" <<EOF
+#!/bin/bash
+# Managed by yamc: wg-peer. Re-resolve the hub endpoint if the tunnel is stale.
+set -e
+IFACE="$WG_IFACE"
+PEER="$WG_HUB_PUBKEY"
+ENDPOINT="$WG_ENDPOINT"
+
+ip link show "\$IFACE" >/dev/null 2>&1 || exit 0
+
+last=\$(wg show "\$IFACE" latest-handshakes 2>/dev/null | awk -v k="\$PEER" '\$1==k{print \$2}')
+now=\$(date +%s)
+
+if [ -z "\$last" ] || [ "\$last" = "0" ] || [ \$(( now - last )) -gt 150 ]; then
+  logger -t wg-reresolve "\$IFACE: handshake stale, re-resolving \$ENDPOINT"
+  wg set "\$IFACE" peer "\$PEER" endpoint "\$ENDPOINT" || true
+fi
+EOF
+chmod 755 "$RERESOLVE_BIN"
+
+cat > "/etc/systemd/system/${RERESOLVE_UNIT}.service" <<EOF
+[Unit]
+Description=Re-resolve WireGuard endpoint for $WG_IFACE
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$RERESOLVE_BIN
+EOF
+
+cat > "/etc/systemd/system/${RERESOLVE_UNIT}.timer" <<EOF
+[Unit]
+Description=Periodically re-resolve the WireGuard endpoint for $WG_IFACE
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+echo "Wrote $RERESOLVE_BIN and its systemd timer"
+
+# ---------------------------------------------------------------------------
+# Apply
+# ---------------------------------------------------------------------------
+echo
+wg_run systemctl daemon-reload
+wg_run systemctl enable "wg-quick@$WG_IFACE"
+
+if [ "$BOOTSTRAP" = true ] || [ "$CONF_CHANGED" = true ] || ! ip link show "$WG_IFACE" >/dev/null 2>&1; then
+  wg_run systemctl restart "wg-quick@$WG_IFACE"
+else
+  echo "    interface unchanged and already up"
+fi
+
+wg_run systemctl enable --now "${RERESOLVE_UNIT}.timer"
+
+ip link show "$WG_IFACE" >/dev/null 2>&1 || wg_die "$WG_IFACE did not come up"
+
+# Give the first handshake a moment. It can only succeed once the hub has this
+# peer's public key, which is the manual step below.
+sleep 3
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+echo
+echo "===================================================================="
+wg show "$WG_IFACE" 2>/dev/null | sed 's/^/  /' || true
+echo "===================================================================="
+
+if age=$(wg_handshake_age "$WG_IFACE" "$WG_HUB_PUBKEY" 2>/dev/null); then
+  echo "Handshake with the hub: ${age}s ago - the tunnel is UP."
+  echo
+  echo "Next: yamc -h $(hostname) -e bk_users=<source-host> backup-box"
+else
+  echo "No handshake with the hub yet - EXPECTED if the hub does not have this"
+  echo "peer's public key. Add it and the tunnel will come up within ~25s:"
+  echo
+  echo "  1. Add this line to yamc.local/wgnet/$WGNET_NAME.peers"
+  echo
+  echo "     $(hostname -s)  | $PEER_ADDR  | $PEER_PUB  |"
+  echo
+  echo "  2. Sync it onto the hub:"
+  echo "       yamc -h <hub> -e net=$WGNET_NAME -e yes=1 wg-hub"
+  echo
+  echo "  3. Check from here:"
+  echo "       yamc -h $(hostname) -e net=$WGNET_NAME wg-peer status"
+  echo
+  echo "  The peer table is not written automatically - yamc modules do not"
+  echo "  modify yamc.local (see AGENTS.md), so this handoff is deliberate."
+fi

@@ -1,0 +1,84 @@
+#!/bin/bash
+# wg-peer/status - report the tunnel state from the spoke side
+#
+# Usage: yamc -h HOST -e net=<name> wg-peer status
+#
+# Read-only. Not root-gated: this is the diagnostic you reach for when
+# something is wrong, and it should not be awkward to run.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+
+wg_banner status
+
+echo
+echo "--- interface ------------------------------------------------------"
+if ip link show "$WG_IFACE" >/dev/null 2>&1; then
+  echo "  $WG_IFACE: up"
+  ip -4 -o addr show dev "$WG_IFACE" 2>/dev/null | awk '{print "    address: " $4}'
+else
+  echo "  $WG_IFACE: NOT PRESENT"
+  echo "    systemctl status wg-quick@$WG_IFACE"
+fi
+
+echo
+echo "--- tunnel to the hub ----------------------------------------------"
+echo "  hub address : $WG_HUB_ADDR"
+echo "  endpoint    : ${WG_ENDPOINT:-(unknown)}"
+
+if [ -n "${WG_HUB_PUBKEY:-}" ] && age=$(wg_handshake_age "$WG_IFACE" "$WG_HUB_PUBKEY" 2>/dev/null); then
+  if [ "$age" -lt 180 ]; then
+    echo "  handshake   : ${age}s ago - UP"
+  else
+    echo "  handshake   : ${age}s ago - STALE"
+    echo "                Over ~3 minutes means the tunnel is effectively down."
+  fi
+else
+  echo "  handshake   : NONE"
+  echo "                Either the hub does not have this peer's public key"
+  echo "                yet, or it cannot be reached. Public key:"
+  [ -f "$WG_PUB" ] && echo "                  $(cat "$WG_PUB")"
+fi
+
+# What the endpoint resolves to NOW versus what the running tunnel is using.
+# A mismatch is the classic dynamic-DNS failure: wg-quick resolved the name
+# once at start and never looked again.
+if [ -n "${WG_ENDPOINT:-}" ]; then
+  host_part="${WG_ENDPOINT%:*}"
+  resolved=$(getent hosts "$host_part" 2>/dev/null | awk '{print $1}' | head -n1)
+  inuse=$(wg show "$WG_IFACE" endpoints 2>/dev/null | awk '{print $2}' | head -n1)
+  echo
+  echo "  $host_part resolves to : ${resolved:-(resolution failed)}"
+  echo "  tunnel is using        : ${inuse:-(none)}"
+  if [ -n "$resolved" ] && [ -n "$inuse" ] && [ "${inuse%:*}" != "$resolved" ]; then
+    echo "    *** MISMATCH - the DDNS address changed and the tunnel is still"
+    echo "        pointed at the old one. The re-resolve timer should correct"
+    echo "        this within ~2 minutes; if not, check the timer below."
+  fi
+fi
+
+echo
+echo "--- reachability ---------------------------------------------------"
+if ping -c1 -W2 "$WG_HUB_ADDR" >/dev/null 2>&1; then
+  echo "  ping $WG_HUB_ADDR: OK"
+else
+  echo "  ping $WG_HUB_ADDR: no reply (the hub may simply not answer pings)"
+fi
+
+echo
+echo "--- re-resolve timer -----------------------------------------------"
+if systemctl list-timers "${RERESOLVE_UNIT}.timer" --no-pager 2>/dev/null | grep -q "$RERESOLVE_UNIT"; then
+  systemctl list-timers "${RERESOLVE_UNIT}.timer" --no-pager 2>/dev/null \
+    | head -3 | sed 's/^/  /'
+else
+  echo "  NOT ACTIVE - wg-quick resolves the endpoint only at interface start,"
+  echo "  so a DDNS change would leave this box silently unreachable."
+  echo "  Re-run: yamc -h $(hostname) -e net=$WGNET_NAME wg-peer"
+fi
+
+echo
+echo "--- live ------------------------------------------------------------"
+wg show "$WG_IFACE" 2>/dev/null | sed 's/^/  /' || echo "  (unavailable - needs root)"
+
+echo
+echo "===================================================================="

@@ -1,0 +1,256 @@
+#!/bin/bash
+# wg-hub/setup - bring up and maintain the hub side of a WireGuard network
+#
+# Usage: yamc -h HOST -e net=<name> wg-hub [-e yes=1]
+#
+# Bootstraps the interface if it does not exist, then syncs peers onto the
+# LIVE interface and applies the LAN access policy. Safe to re-run: peer sync
+# is the recurring operation, and 'wg syncconf' removes peers absent from the
+# config, which is exactly revocation.
+#
+# 'wg-hub help' prints the manual equivalent of everything below.
+
+set -e
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+
+wg_banner setup
+wg_need_root
+
+PEERS_TAB="$MOD_TMP/peers.tab"
+BOOTSTRAP=false
+[ -f "$WG_CONF" ] || BOOTSTRAP=true
+
+# ---------------------------------------------------------------------------
+# Report the plan
+# ---------------------------------------------------------------------------
+echo
+echo "PLAN:"
+if [ "$BOOTSTRAP" = true ]; then
+  echo "    BOOTSTRAP - $WG_CONF does not exist yet"
+  echo "      install wireguard-tools"
+  echo "      generate a keypair (umask 077) at $WG_KEY"
+  echo "      write $WG_CONF   address $WG_HUB_ADDR, port $WG_PORT"
+  echo "      systemctl enable --now wg-quick@$WG_IFACE"
+else
+  echo "    interface $WG_IFACE exists; the private key is left alone"
+fi
+echo "    sync peers from the table below onto the live interface"
+echo "    apply LAN policy: $LAN_POLICY"
+echo
+
+if [ -s "$PEERS_TAB" ]; then
+  echo "  Peers to be configured (each pinned to a single /32):"
+  while IFS='|' read -r name addr key notes; do
+    [ -z "$name" ] && continue
+    echo "    $name  $addr/32  ${key:0:12}...${notes:+  ($notes)}"
+  done < "$PEERS_TAB"
+else
+  echo "  No peers defined yet."
+fi
+
+echo
+case "$LAN_POLICY" in
+  none)
+    echo "  Policy 'none': NO forwarding for $WG_IFACE in either direction."
+    echo "    The tunnel terminates on this host. Peers can reach this hub and"
+    echo "    nothing beyond it."
+    ;;
+  route:*)
+    echo "  Policy 'route': forward only between $WG_IFACE and ${LAN_POLICY#route:}."
+    echo "    That host may initiate to peers; peers may NEVER initiate inward,"
+    echo "    only reply on established connections."
+    ;;
+  full)
+    echo "  Policy 'FULL': peers get unrestricted LAN access."
+    echo "    Appropriate for road-warrior laptops. NOT for a box in territory"
+    echo "    you do not control."
+    ;;
+esac
+
+echo
+echo "  Rules are written to $WG_NFT and applied by wg-quick PostUp, in a"
+echo "  table of their own ('inet $NFT_TABLE') at a late hook priority so they"
+echo "  are the final word over anything Docker or another instance installed."
+
+wg_gate "configure the $WG_IFACE hub"
+
+# ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
+if ! command -v wg >/dev/null 2>&1; then
+  echo
+  echo "Installing wireguard-tools..."
+  wg_run apt-get update -qq
+  wg_run apt-get install -y wireguard-tools
+fi
+command -v nft >/dev/null 2>&1 || {
+  echo "Installing nftables..."
+  wg_run apt-get install -y nftables
+}
+
+mkdir -p "$WG_DIR"
+chmod 700 "$WG_DIR"
+
+# ---------------------------------------------------------------------------
+# Keypair - generated here, private half never leaves this host
+# ---------------------------------------------------------------------------
+if [ ! -f "$WG_KEY" ]; then
+  echo
+  echo "Generating hub keypair..."
+  ( umask 077; wg genkey > "$WG_KEY" )
+  wg pubkey < "$WG_KEY" > "$WG_PUB"
+  chmod 600 "$WG_KEY"; chmod 644 "$WG_PUB"
+  echo "    $WG_KEY (private, stays here)"
+  echo "    $WG_PUB"
+fi
+HUB_PRIV=$(cat "$WG_KEY")
+HUB_PUB=$(cat "$WG_PUB")
+
+# ---------------------------------------------------------------------------
+# Policy ruleset
+#
+# The chain policy is ACCEPT and only this interface is restricted - a drop
+# policy here would break every other forwarding path on the host, including
+# wg-easy and Docker.
+#
+# Priority 100 puts this after iptables' filter FORWARD (priority 0), so an
+# ACCEPT installed there cannot override these drops.
+# ---------------------------------------------------------------------------
+case "$LAN_POLICY" in
+  none)
+    POLICY_RULES="    iifname \"$WG_IFACE\" drop
+    oifname \"$WG_IFACE\" drop"
+    ;;
+  route:*)
+    SRC_HOST="${LAN_POLICY#route:}"
+    SRC_IP=$(getent hosts "$SRC_HOST" 2>/dev/null | awk '{print $1}' | head -n1)
+    [ -n "$SRC_IP" ] || SRC_IP="$SRC_HOST"
+    case "$SRC_IP" in
+      *[!0-9.]*) wg_die "Cannot resolve LAN_POLICY host '$SRC_HOST' to an IPv4 address" ;;
+    esac
+    echo
+    echo "Policy host $SRC_HOST resolves to $SRC_IP"
+    POLICY_RULES="    oifname \"$WG_IFACE\" ip saddr $SRC_IP accept
+    oifname \"$WG_IFACE\" drop
+    iifname \"$WG_IFACE\" ct state established,related accept
+    iifname \"$WG_IFACE\" drop"
+    ;;
+  full)
+    POLICY_RULES="    iifname \"$WG_IFACE\" accept
+    oifname \"$WG_IFACE\" accept"
+    ;;
+esac
+
+# The create-then-delete preamble makes 'nft -f' idempotent: the delete cannot
+# fail on a host where the table does not exist yet.
+cat > "$WG_NFT" <<EOF
+#!/usr/sbin/nft -f
+# Managed by yamc: wg-hub (network '$WGNET_NAME', policy '$LAN_POLICY').
+# Applied by wg-quick PostUp; removed by PostDown.
+
+table inet $NFT_TABLE
+delete table inet $NFT_TABLE
+
+table inet $NFT_TABLE {
+  chain forward {
+    type filter hook forward priority 100; policy accept;
+$POLICY_RULES
+  }
+}
+EOF
+chmod 644 "$WG_NFT"
+echo
+echo "Wrote policy ruleset $WG_NFT"
+
+# ---------------------------------------------------------------------------
+# Interface config
+# ---------------------------------------------------------------------------
+NEW_CONF=$(
+  echo "# Managed by yamc: wg-hub. Network '$WGNET_NAME'."
+  echo "# Peers come from yamc.local/wgnet/$WGNET_NAME.peers - edit there, not here."
+  echo ""
+  echo "[Interface]"
+  echo "Address    = $WG_HUB_ADDR/${WG_SUBNET#*/}"
+  echo "ListenPort = $WG_PORT"
+  echo "PrivateKey = $HUB_PRIV"
+  echo "PostUp     = nft -f $WG_NFT"
+  echo "PostDown   = nft delete table inet $NFT_TABLE 2>/dev/null || true"
+  if [ -s "$PEERS_TAB" ]; then
+    while IFS='|' read -r name addr key notes; do
+      [ -z "$name" ] && continue
+      echo ""
+      echo "[Peer]"
+      echo "# $name${notes:+ - $notes}"
+      echo "PublicKey  = $key"
+      echo "AllowedIPs = $addr/32"
+    done < "$PEERS_TAB"
+  fi
+)
+
+CONF_CHANGED=true
+if [ -f "$WG_CONF" ] && [ "$(cat "$WG_CONF")" = "$NEW_CONF" ]; then
+  CONF_CHANGED=false
+  echo "Interface config already up to date: $WG_CONF"
+else
+  ( umask 077; echo "$NEW_CONF" > "$WG_CONF" )
+  chmod 600 "$WG_CONF"
+  echo "Wrote $WG_CONF"
+fi
+
+# ---------------------------------------------------------------------------
+# Apply
+#
+# 'wg syncconf' updates peers on a LIVE interface without tearing it down, and
+# removes peers absent from the config - which is precisely revocation.
+# Address/ListenPort changes are not covered by syncconf, so a bootstrap or an
+# interface-level change restarts instead.
+# ---------------------------------------------------------------------------
+echo
+if [ "$BOOTSTRAP" = true ] || ! ip link show "$WG_IFACE" >/dev/null 2>&1; then
+  echo "Bringing up $WG_IFACE..."
+  wg_run systemctl enable "wg-quick@$WG_IFACE"
+  wg_run systemctl restart "wg-quick@$WG_IFACE"
+else
+  echo "Syncing peers onto the live interface (no downtime)..."
+  wg_run bash -c "wg syncconf '$WG_IFACE' <(wg-quick strip '$WG_IFACE')"
+  # PostUp does not re-run on syncconf, so reapply the policy directly. The
+  # ruleset is idempotent.
+  wg_run nft -f "$WG_NFT"
+fi
+
+ip link show "$WG_IFACE" >/dev/null 2>&1 || wg_die "$WG_IFACE did not come up"
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+echo
+echo "===================================================================="
+wg show "$WG_IFACE" 2>/dev/null | sed 's/^/  /' || true
+echo "===================================================================="
+echo "Policy '$LAN_POLICY' active in table inet $NFT_TABLE:"
+nft list table inet "$NFT_TABLE" 2>/dev/null | sed 's/^/  /' || echo "  (table not present!)"
+
+if [ "$BOOTSTRAP" = true ] || [ -z "${WG_HUB_PUBKEY:-}" ]; then
+  echo
+  echo "===================================================================="
+  echo "HUB PUBLIC KEY - peers need this."
+  echo
+  echo "  Put it in yamc.local/wgnet/$WGNET_NAME.conf as:"
+  echo
+  echo "    WG_HUB_PUBKEY=\"$HUB_PUB\""
+  echo
+  echo "  Then configure a peer with:"
+  echo "    yamc -h <box> -e net=$WGNET_NAME -e addr=<tunnel-addr> wg-peer"
+  echo "===================================================================="
+elif [ "$WG_HUB_PUBKEY" != "$HUB_PUB" ]; then
+  echo
+  echo "WARNING: WG_HUB_PUBKEY in $WGNET_NAME.conf does not match this host."
+  echo "  config says: $WG_HUB_PUBKEY"
+  echo "  actual:      $HUB_PUB"
+  echo "  Peers built from that config will not be able to reach this hub."
+fi
+
+echo
+echo "Make sure UDP $WG_PORT is forwarded to this host at your border router."

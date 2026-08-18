@@ -25,9 +25,9 @@ reviewed first, deliberately.
 ## Usage
 
 ```sh
-yamc -h uranus wg-hub -e net=bkup                 # report what it would do
-yamc -h uranus wg-hub -e net=bkup -e yes=1        # do it
-yamc -h uranus wg-hub -e net=bkup status          # interface, peers, handshakes
+yamc -h uranus -e net=bkup wg-hub                 # report what it would do
+yamc -h uranus -e net=bkup -e yes=1 wg-hub        # do it
+yamc -h uranus -e net=bkup wg-hub status          # interface, peers, handshakes
 yamc wg-hub help                                  # usage + the manual equivalent
 ```
 

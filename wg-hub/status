@@ -1,0 +1,87 @@
+#!/bin/bash
+# wg-hub/status - report interface, peers and policy
+#
+# Usage: yamc -h HOST -e net=<name> wg-hub status
+#
+# Read-only, and deliberately not root-gated: 'wg show' needs root to display
+# keys but the rest is useful unprivileged, and a diagnostic you cannot reach
+# easily is a diagnostic you will not run.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+
+wg_banner status
+
+PEERS_TAB="$MOD_TMP/peers.tab"
+
+echo
+echo "--- interface ------------------------------------------------------"
+if ip link show "$WG_IFACE" >/dev/null 2>&1; then
+  echo "  $WG_IFACE: up"
+  ip -4 -o addr show dev "$WG_IFACE" 2>/dev/null | awk '{print "    address: " $4}'
+  echo "    listen : $(wg show "$WG_IFACE" listen-port 2>/dev/null || echo '(need root)')"
+else
+  echo "  $WG_IFACE: NOT PRESENT"
+  echo "    Run: yamc -h $(hostname) -e net=$WGNET_NAME wg-hub"
+fi
+
+echo
+echo "--- expected peers (from $WGNET_NAME.peers) -------------------------"
+if [ -s "$PEERS_TAB" ]; then
+  while IFS='|' read -r name addr key notes; do
+    [ -z "$name" ] && continue
+    if age=$(wg_handshake_age "$WG_IFACE" "$key" 2>/dev/null); then
+      if [ "$age" -lt 180 ]; then
+        state="OK        last handshake ${age}s ago"
+      else
+        state="STALE     last handshake ${age}s ago"
+      fi
+    else
+      state="NO HANDSHAKE  (never, or needs root)"
+    fi
+    printf '  %-12s %-14s %s\n' "$name" "$addr/32" "$state"
+    [ -n "$notes" ] && printf '  %-12s %s\n' "" "($notes)"
+  done < "$PEERS_TAB"
+  echo
+  echo "  A spoke that dials out should handshake every ~2 minutes while its"
+  echo "  keepalive is running. Anything over ~3 minutes means the tunnel is"
+  echo "  down - which on an unattended box is the failure that matters."
+else
+  echo "  (no peers defined)"
+fi
+
+echo
+echo "--- live peers -----------------------------------------------------"
+wg show "$WG_IFACE" 2>/dev/null | sed 's/^/  /' || echo "  (unavailable - needs root)"
+
+echo
+echo "--- policy ---------------------------------------------------------"
+echo "  configured: $LAN_POLICY"
+if nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
+  echo "  table inet $NFT_TABLE: ACTIVE"
+  nft list table inet "$NFT_TABLE" 2>/dev/null | sed 's/^/    /'
+else
+  echo "  table inet $NFT_TABLE: NOT PRESENT"
+  if [ "$LAN_POLICY" != "full" ]; then
+    echo "    *** The restriction is NOT in force. Peers on this network may"
+    echo "        be able to reach further than intended. Re-run wg-hub."
+  fi
+fi
+
+# The wg+ wildcard hazard: a rule written elsewhere can silently grant
+# forwarding this module never asked for.
+echo
+echo "--- wildcard rules elsewhere ---------------------------------------"
+if command -v iptables-save >/dev/null 2>&1 && iptables-save 2>/dev/null | grep -q -- '-i wg+\|-o wg+'; then
+  echo "  NOTE: iptables carries 'wg+' wildcard rules:"
+  iptables-save 2>/dev/null | grep -- 'wg+' | sed 's/^/    /'
+  case "$WG_IFACE" in
+    wg*) echo "    *** '$WG_IFACE' MATCHES that wildcard. This is the hazard." ;;
+    *)   echo "    '$WG_IFACE' does not match them, which is why it is named this way." ;;
+  esac
+else
+  echo "  none found"
+fi
+
+echo
+echo "===================================================================="

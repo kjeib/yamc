@@ -1,0 +1,15 @@
+#!/bin/bash
+# wg-peer/status.loc - resolve the network definition for the status report
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/wgnet.loc.sh"
+
+wgnet_load "${net:-}" || exit 1
+
+{
+  echo "WGNET_NAME=\"$net\""
+  echo "WG_IFACE=\"$WG_IFACE\""
+  echo "WG_HUB_ADDR=\"$WG_HUB_ADDR\""
+  echo "WG_ENDPOINT=\"${WG_ENDPOINT:-}\""
+  [ -n "${WG_HUB_PUBKEY:-}" ] && echo "WG_HUB_PUBKEY=\"$WG_HUB_PUBKEY\""
+} >> "$MOD_TMP/env"

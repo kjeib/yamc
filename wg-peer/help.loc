@@ -1,0 +1,103 @@
+#!/bin/bash
+# wg-peer/help.loc - Module-specific help
+
+cat <<'EOF'
+Module: wg-peer - spoke side of a WireGuard network
+
+  Configures a machine that dials OUT to a hub, holds the tunnel open through
+  NAT, and re-resolves the hub's address when it changes.
+
+  Generic. Nothing here is backup-specific. WHY a given network is configured
+  the way it is lives in backup-box/README.md.
+
+SUBCOMMANDS
+
+  setup                  Install, generate a keypair, write the interface,
+                         install the re-resolve timer, print the peer line.
+      yamc -h BOX -e net=bkup -e addr=10.9.9.2 wg-peer
+      yamc -h BOX -e net=bkup -e addr=10.9.9.2 -e yes=1 wg-peer
+
+  status                 Interface, handshake age, DDNS drift, timer. Read-only.
+      yamc -h BOX -e net=bkup wg-peer status
+
+  -e net=NAME  REQUIRED, no default.
+  -e addr=ADDR REQUIRED, no default. Without it the module lists the addresses
+               already in use and stops - auto-picking risks a collision, and
+               WireGuard does not error on overlapping AllowedIPs, it silently
+               reassigns and misroutes the loser.
+
+KEYS
+
+  The private key is generated ON THIS MACHINE and never leaves it - not to
+  yamc, not into yamc.local. Only the public key comes back, printed as a
+  ready-to-paste line for yamc.local/wgnet/<net>.peers.
+
+  That paste is manual by design: yamc modules do not write to yamc.local
+  (AGENTS.md).
+
+THE TWO /32s
+
+  Address    = <this box>/32
+  AllowedIPs = <hub>/32          the hub, and nothing else
+
+  So this machine's routing table contains no route toward the hub's LAN at
+  all. Combined with the matching /32 in the hub's peer stanza, isolation is
+  structural at both ends rather than a firewall rule either side could get
+  wrong.
+
+  AllowedIPs = 0.0.0.0/0 would instead route ALL of this machine's traffic
+  through the tunnel - correct for a laptop on hotel wifi, wrong for a remote
+  box that should only be able to reach the hub.
+
+ENDPOINT RE-RESOLUTION
+
+  wg-quick resolves the endpoint hostname ONCE, at interface start. When a
+  dynamic-DNS name changes address, the tunnel stays down until something
+  restarts it. On an unattended box at a remote site that is the failure that
+  matters most, and it is silent.
+
+  So a systemd timer runs every 2 minutes and re-resolves ONLY when the
+  handshake has actually gone stale (>150s), leaving a working tunnel alone:
+
+    wg set bk0 peer <hub pubkey> endpoint bateman.cc:51822
+
+  PersistentKeepalive=25 handles the other half - it holds the NAT mapping at
+  the remote site open, and lets the hub learn this peer's current address.
+
+  'wg-peer status' compares what the endpoint resolves to NOW against what the
+  running tunnel is using, so DDNS drift is visible rather than mysterious.
+
+MANUAL EQUIVALENT
+
+    apt-get install wireguard-tools
+    umask 077
+    wg genkey | tee /etc/wireguard/bk0.key | wg pubkey > /etc/wireguard/bk0.pub
+
+    cat > /etc/wireguard/bk0.conf <<'END'
+    [Interface]
+    Address    = 10.9.9.2/32
+    PrivateKey = <contents of bk0.key>
+
+    [Peer]
+    PublicKey           = <hub public key>
+    Endpoint            = bateman.cc:51822
+    AllowedIPs          = 10.9.9.1/32
+    PersistentKeepalive = 25
+    END
+
+    systemctl enable --now wg-quick@bk0
+    cat /etc/wireguard/bk0.pub        # hand this to the hub operator
+
+  Check:  wg show bk0     ('latest handshake' should be under ~2 minutes)
+          ping 10.9.9.1   (the hub, and nothing beyond it)
+
+INTERFACE NAMING
+
+  Do not name it wg*. See 'wg-hub help' - the wg+ wildcard in common firewall
+  snippets is the reason, and it applies to both ends. The module refuses.
+
+SEE ALSO
+
+  wg-hub                 the hub side
+  backup-box/README.md   system design and threat model
+EOF

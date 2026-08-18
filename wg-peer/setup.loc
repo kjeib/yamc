@@ -1,0 +1,84 @@
+#!/bin/bash
+# wg-peer/setup.loc - resolve and validate the network definition locally
+#
+# Usage: yamc -h HOST -e net=<name> -e addr=<tunnel-addr> wg-peer [-e yes=1]
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/wgnet.loc.sh"
+
+wgnet_load "${net:-}" || exit 1
+
+# The peer needs the hub's identity and where to dial. It does NOT read
+# LAN_POLICY: policy is enforced at the hub, and a peer that could opt itself
+# into more access would defeat the point.
+missing=""
+for v in WG_HUB_PUBKEY WG_ENDPOINT WG_HUB_ADDR; do
+  [ -n "${!v}" ] || missing="$missing $v"
+done
+if [ -n "$missing" ]; then
+  echo "ERROR: $WGNET_DIR/$net.conf is missing:$missing"
+  echo ""
+  echo "  WG_HUB_PUBKEY is printed by 'wg-hub' when it bootstraps the hub."
+  echo "  Paste it into $net.conf before configuring peers."
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Tunnel address. No default: picking one automatically risks colliding with
+# an existing peer, and WireGuard does not error on overlapping AllowedIPs -
+# it silently reassigns the address and misroutes the loser.
+# ---------------------------------------------------------------------------
+if [ -z "${addr:-}" ]; then
+  echo ""
+  echo "ERROR: no tunnel address given. Use -e addr=<address>."
+  echo ""
+  echo "Addresses already in use on network '$net':"
+  if [ -f "$WGNET_DIR/$net.peers" ]; then
+    while IFS='|' read -r name a key notes; do
+      name=$(echo "$name" | xargs); a=$(echo "$a" | xargs)
+      [ -z "$name" ] && continue
+      case "$name" in \#*) continue ;; esac
+      printf '  %-14s %s\n' "$a" "$name"
+    done < "$WGNET_DIR/$net.peers"
+  else
+    echo "  (none yet)"
+  fi
+  echo "  $WG_HUB_ADDR    <- the hub itself"
+  echo ""
+  echo "Subnet is $WG_SUBNET. Pick a free address."
+  exit 1
+fi
+
+# Refuse an address already claimed by a different peer.
+if [ -f "$WGNET_DIR/$net.peers" ]; then
+  while IFS='|' read -r name a key notes; do
+    name=$(echo "$name" | xargs); a=$(echo "$a" | xargs)
+    [ -z "$name" ] && continue
+    case "$name" in \#*) continue ;; esac
+    if [ "$a" = "$addr" ] && [ "$name" != "$tgt_host" ]; then
+      echo "ERROR: $addr is already assigned to peer '$name'."
+      echo "       Two peers sharing an address misroute one of them silently."
+      exit 1
+    fi
+  done < "$WGNET_DIR/$net.peers"
+fi
+
+if [ "$addr" = "$WG_HUB_ADDR" ]; then
+  echo "ERROR: $addr is the hub's own address."
+  exit 1
+fi
+
+echo ""
+echo "  interface : $WG_IFACE"
+echo "  address   : $addr/32"
+echo "  hub       : $WG_HUB_ADDR  via $WG_ENDPOINT"
+echo ""
+
+{
+  echo "WGNET_NAME=\"$net\""
+  echo "WG_IFACE=\"$WG_IFACE\""
+  echo "WG_HUB_ADDR=\"$WG_HUB_ADDR\""
+  echo "WG_HUB_PUBKEY=\"$WG_HUB_PUBKEY\""
+  echo "WG_ENDPOINT=\"$WG_ENDPOINT\""
+  echo "PEER_ADDR=\"$addr\""
+} >> "$MOD_TMP/env"

@@ -24,9 +24,9 @@ reviewed first, deliberately.
 ## Usage
 
 ```sh
-yamc -h orion wg-peer -e net=bkup                 # report what it would do
-yamc -h orion wg-peer -e net=bkup -e yes=1        # do it
-yamc -h orion wg-peer -e net=bkup status          # interface, handshake age
+yamc -h orion -e net=bkup wg-peer                 # report what it would do
+yamc -h orion -e net=bkup -e yes=1 wg-peer        # do it
+yamc -h orion -e net=bkup wg-peer status          # interface, handshake age
 yamc wg-peer help
 ```
 

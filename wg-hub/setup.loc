@@ -1,0 +1,32 @@
+#!/bin/bash
+# wg-hub/setup.loc - resolve and validate the network definition locally
+#
+# Usage: yamc -h HOST -e net=<name> wg-hub [-e yes=1]
+#
+# All of yamc.local lives on THIS machine, so config resolution and validation
+# happen here; the remote script receives only the resolved values and a
+# staged peer table.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/wgnet.loc.sh"
+
+wgnet_load "${net:-}" || exit 1
+
+echo ""
+echo "  interface : $WG_IFACE"
+echo "  address   : $WG_HUB_ADDR  (subnet $WG_SUBNET)"
+echo "  port      : $WG_PORT"
+echo "  policy    : $LAN_POLICY"
+echo ""
+
+wgnet_peers "$net" "$MOD_TMP/peers.tab" || exit 1
+
+{
+  echo "WGNET_NAME=\"$net\""
+  echo "WG_IFACE=\"$WG_IFACE\""
+  echo "WG_PORT=\"$WG_PORT\""
+  echo "WG_SUBNET=\"$WG_SUBNET\""
+  echo "WG_HUB_ADDR=\"$WG_HUB_ADDR\""
+  echo "LAN_POLICY=\"$LAN_POLICY\""
+  [ -n "${WG_HUB_PUBKEY:-}" ] && echo "WG_HUB_PUBKEY=\"$WG_HUB_PUBKEY\""
+} >> "$MOD_TMP/env"

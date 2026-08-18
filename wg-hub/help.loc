@@ -1,0 +1,121 @@
+#!/bin/bash
+# wg-hub/help.loc - Module-specific help
+
+cat <<'EOF'
+Module: wg-hub - hub side of a WireGuard network
+
+  Generic. Nothing here is backup-specific; the same module is meant to serve
+  a mobile/road-warrior network later, with different config and policy.
+
+  WHY a given network is configured the way it is - threat model, isolation -
+  lives in backup-box/README.md. This module is mechanism only.
+
+SUBCOMMANDS
+
+  setup                  Bootstrap the interface if absent, then sync peers
+                         onto the LIVE interface and apply the LAN policy.
+      yamc -h HUB -e net=bkup wg-hub              # report, then prompt
+      yamc -h HUB -e net=bkup -e yes=1 wg-hub     # act
+
+  status                 Interface, expected vs live peers, handshake ages,
+                         policy state. Read-only.
+      yamc -h HUB -e net=bkup wg-hub status
+
+  -e net=NAME is REQUIRED. No default: the wrong one would apply a mobile
+  network's policy to a backup network, or vice versa.
+
+CONFIGURATION  (yamc.local/wgnet/<net>.conf and <net>.peers)
+
+  WG_IFACE      interface name - must NOT start with 'wg' (see below)
+  WG_PORT       listen port
+  WG_SUBNET     e.g. 10.9.9.0/24
+  WG_HUB_ADDR   this hub's tunnel address
+  WG_HUB_PUBKEY printed on bootstrap; paste it in, peers need it
+  WG_ENDPOINT   what peers dial (used by wg-peer)
+  LAN_POLICY    none | route:<host> | full     REQUIRED, no default
+
+  <net>.peers is pipe-delimited:   name | tunnel addr | public key | notes
+
+  Duplicate addresses are refused. WireGuard does not error on overlapping
+  AllowedIPs - it silently reassigns the address to whichever peer was
+  configured last, misrouting the other.
+
+LAN_POLICY IS FAIL-CLOSED
+
+  Unset or unrecognised is a hard error, never a permissive default. Because
+  this module is shared across networks, a permissive default is how a backup
+  network would eventually get loosened by a change made for a mobile one.
+
+    none          no forwarding at all; the tunnel terminates on the hub
+    route:<host>  that one host may initiate to peers; peers may NEVER
+                  initiate inward, only reply on established connections
+    full          unrestricted LAN access (road warriors, not remote boxes)
+
+  Rules go in their own nftables table at hook priority 100 - after iptables'
+  filter FORWARD - so an ACCEPT installed by Docker or another instance
+  cannot override them. The chain policy is ACCEPT and only this interface is
+  restricted; a drop policy would break every other forwarding path on the
+  host.
+
+WHY THE INTERFACE IS NOT NAMED wg0
+
+  Firewall snippets very commonly use the 'wg+' wildcard:
+
+      iptables -A FORWARD -i wg+ -j ACCEPT
+
+  That matches ANY interface starting with 'wg'. On a host already running
+  another WireGuard instance, such a rule would silently grant forwarding to a
+  new wg* interface too. The module REFUSES a WG_IFACE beginning with 'wg'.
+  Hence names like 'bk0'. 'wg-hub status' also reports any wg+ rules it finds.
+
+MANUAL EQUIVALENT
+
+  Bootstrap, once:
+
+    apt-get install wireguard-tools
+    umask 077
+    wg genkey | tee /etc/wireguard/bk0.key | wg pubkey > /etc/wireguard/bk0.pub
+
+    cat > /etc/wireguard/bk0.conf <<'END'
+    [Interface]
+    Address    = 10.9.9.1/24
+    ListenPort = 51822
+    PrivateKey = <contents of bk0.key>
+    PostUp     = nft -f /etc/wireguard/bk0.nft
+    PostDown   = nft delete table inet wgnet_bkup 2>/dev/null || true
+    END
+
+    systemctl enable --now wg-quick@bk0
+
+  A peer stanza (AllowedIPs MUST be a single /32 - WireGuard drops packets
+  whose source is outside it BEFORE decryption, which is what makes address
+  spoofing structurally impossible rather than merely filtered):
+
+    [Peer]
+    # orion
+    PublicKey  = <peer public key>
+    AllowedIPs = 10.9.9.2/32
+
+  Add or revoke a peer, without dropping the interface:
+
+    wg syncconf bk0 <(wg-quick strip bk0)
+
+  syncconf REMOVES peers absent from the config - that is revocation, and it
+  does not disturb the other peers.
+
+  Inspect:  wg show bk0
+
+BEFORE FIRST USE
+
+  Audit the host - see backup-box/README.md, "Pre-Build Audit". Check for wg+
+  wildcard rules, confirm net.ipv4.ip_forward is already on (so isolation
+  cannot rest on it being off), and confirm the new subnet does not overlap an
+  existing one.
+
+  Also make sure UDP <WG_PORT> is forwarded to this host at the border router.
+
+SEE ALSO
+
+  wg-peer                the spoke side
+  backup-box/README.md   system design and threat model
+EOF
