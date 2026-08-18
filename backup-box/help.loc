@@ -27,29 +27,27 @@ SUBCOMMANDS
   storage                        Claim unallocated volume-group space for the
                                  backup volume. Reports first; acts on -e yes=1.
       yamc -h HOST backup-box storage
-      yamc -h HOST backup-box storage -e yes=1
-      yamc -h HOST backup-box storage -e bk_vg=ubuntu-vg -e bk_size=95%FREE
+      yamc -h HOST -e yes=1 backup-box storage
+      yamc -h HOST -e bk_vg=ubuntu-vg -e bk_size=95%FREE backup-box storage
 
   setup                          Install rest-server, create repositories and
                                  credentials. Prints new passwords ONCE.
-      yamc -h HOST backup-box -e bk_users=uranus
-      yamc -h HOST backup-box -e bk_users="uranus sun" -e yes=1
+      yamc -h HOST -e bk_users=uranus backup-box
+      yamc -h HOST -e bk_users="uranus sun" -e yes=1 backup-box
 
   lockdown                       Egress policy. RUN THIS LAST - it is the step
                                  that can lock you out. Auto-reverts after 60s
                                  unless -e permanent=1.
       yamc -h HOST backup-box lockdown
-      yamc -h HOST backup-box lockdown -e yes=1
-      yamc -h HOST backup-box lockdown -e yes=1 -e permanent=1
+      yamc -h HOST -e yes=1 backup-box lockdown
+      yamc -h HOST -e yes=1 -e permanent=1 backup-box lockdown
 
   status                         Tunnel, storage, service, repositories, rules.
       yamc -h HOST backup-box status
 
 CONFIRMATION MODEL
 
-  Anything destructive or lockout-prone prints its full plan, then:
-
-    -e yes=1 given      proceed without asking
+  Anything destructive or lockout-prone prints its full plan, then: given      proceed without asking
     terminal available  prompt
     no terminal         refuse (yamcity redirects stdin from /dev/null, so a
                         prompt there would read EOF and silently proceed)

@@ -386,8 +386,8 @@ is intentional; there is no box-to-box replication in this design.
 touches networking on your main server, so **it reports before it acts**:
 
 ```sh
-yamc -h uranus wg-hub -e net=bkup            # report: shows exactly what it would do
-yamc -h uranus wg-hub -e net=bkup -e yes=1   # act
+yamc -h uranus -e net=bkup wg-hub            # report: shows exactly what it would do
+yamc -h uranus -e net=bkup -e yes=1 wg-hub   # act
 ```
 
 Without `-e yes=1` it prints the plan and, if it has a terminal, prompts. With
@@ -557,7 +557,7 @@ tens of terabytes.
 Order matters. Steps 9 and 10 are the ones people skip and regret.
 
 1. **Audit uranus** — [Pre-Build Audit](#pre-build-audit-of-uranus). Do not skip.
-2. **Set up the hub** — `yamc -h uranus wg-hub -e net=bkup` (report), then again
+2. **Set up the hub** — `yamc -h uranus -e net=bkup` wg-hub (report), then again
    with `-e yes=1`. See [Hub Setup](#hub-setup) for the manual equivalent.
 3. **Build Ubuntu to the basic profile** — the existing modules (`timezone`,
    `pref`, `upgrade`, `packages`, `ssh2user`). Partitioning and any FDE
@@ -565,11 +565,11 @@ Order matters. Steps 9 and 10 are the ones people skip and regret.
 4. `yamc init -h orion -u kyle`
 5. `yamc -h orion backup-box storage` — report first, then `-e yes=1`. Claims
    the free extents, creates `/srv/backup`.
-6. `yamc -h orion wg-peer -e net=bkup` — tunnel config. Prints a ready-to-paste
+6. `yamc -h orion -e net=bkup` wg-peer — tunnel config. Prints a ready-to-paste
    `bkup.peers` line containing the public key. **Paste it in.** Manual by design.
-7. `yamc -h uranus wg-hub -e net=bkup -e yes=1` — syncs the peer onto the live
+7. `yamc -h uranus -e net=bkup -e yes=1` wg-hub — syncs the peer onto the live
    interface.
-8. `yamc -h orion backup-box -e bk_users=uranus` — rest-server and repositories.
+8. `yamc -h orion -e bk_users=uranus` backup-box — rest-server and repositories.
    Prints the generated credential **once**; put it on the source host.
 9. **Verify on the LAN**, then **seed on-site at LAN speed.** Terabytes over a
    residential uplink is not a first run, it is a month.
@@ -666,7 +666,7 @@ plus an offline copy. **A backup you cannot decrypt is not a backup.**
 If a box is stolen, sold, scavenged, or merely suspect:
 
 1. Delete its line from `yamc.local/wgnet/bkup.peers`.
-2. `yamc -h uranus wg-hub -e net=bkup` — `wg syncconf` removes the peer from
+2. `yamc -h uranus -e net=bkup` wg-hub — `wg syncconf` removes the peer from
    the live interface; its key is now inert. Other boxes are undisturbed.
 3. Rotate the rest-server credential for that source host.
 4. Assume its SSH host key is public; remove it from `known_hosts`.

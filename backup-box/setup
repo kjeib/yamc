@@ -5,7 +5,7 @@
 # only. The box never holds a repository password, so everything under
 # $BK_REPOS is opaque to this machine.
 #
-# Usage: yamc -h HOST backup-box -e bk_users="uranus" [-e yes=1]
+# Usage: yamc -h HOST -e bk_users="uranus" backup-box [-e yes=1]
 #
 # Options:
 #   -e bk_users="a b"     rest-server users to create, one per source host

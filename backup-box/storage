@@ -6,7 +6,7 @@
 # extending root, so a runaway repository fills its own filesystem instead of
 # wedging the box.
 #
-# Usage: yamc -h HOST backup-box storage [-e yes=1]
+# Usage: yamc -h HOST [-e yes=1] backup-box storage
 #
 # This is the only part of the system that can destroy data. It is deliberately
 # timid - see "Safety rules" in README.md. In particular it NEVER touches an
@@ -170,4 +170,4 @@ echo
 echo "===================================================================="
 df -h "$BK_MOUNT" | sed 's/^/  /'
 echo "===================================================================="
-echo "Storage ready. Next: yamc -h $(hostname) backup-box -e bk_users=<source-host>"
+echo "Storage ready. Next: yamc -h $(hostname) -e bk_users=<source-host> backup-box"

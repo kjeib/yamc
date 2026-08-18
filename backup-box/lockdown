@@ -4,8 +4,8 @@
 #
 # Usage:
 #   yamc -h HOST backup-box lockdown                    # report
-#   yamc -h HOST backup-box lockdown -e yes=1           # apply, AUTO-REVERTS
-#   yamc -h HOST backup-box lockdown -e yes=1 -e permanent=1   # persist
+#   yamc -h HOST -e yes=1 backup-box lockdown           # apply, AUTO-REVERTS
+#   yamc -h HOST -e yes=1 -e permanent=1 backup-box lockdown   # persist
 #
 # THIS IS THE STEP THAT CAN LOCK YOU OUT. By default the ruleset is applied
 # with an automatic revert after $revert_after seconds; if you lose access, do
@@ -131,7 +131,7 @@ else
   echo "Lockdown applied, REVERTING in ${REVERT_AFTER}s."
   echo
   echo "  Confirm you still have access, then make it permanent:"
-  echo "    yamc -h $(hostname) backup-box lockdown -e yes=1 -e permanent=1"
+  echo "    yamc -h $(hostname) -e yes=1 -e permanent=1 backup-box lockdown"
   echo
   echo "  To revert right now:"
   echo "    nft delete table inet $BK_NFT_TABLE"
