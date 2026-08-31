@@ -12,4 +12,5 @@ wgnet_load "${net:-}" || exit 1
   echo "WG_HUB_ADDR=\"$WG_HUB_ADDR\""
   echo "WG_ENDPOINT=\"${WG_ENDPOINT:-}\""
   [ -n "${WG_HUB_PUBKEY:-}" ] && echo "WG_HUB_PUBKEY=\"$WG_HUB_PUBKEY\""
+  true   # a trailing conditional must not leak its status
 } >> "$MOD_TMP/env"

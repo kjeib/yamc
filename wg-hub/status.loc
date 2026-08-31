@@ -15,4 +15,5 @@ wgnet_peers "$net" "$MOD_TMP/peers.tab" >/dev/null || exit 1
   echo "WG_HUB_ADDR=\"$WG_HUB_ADDR\""
   echo "LAN_POLICY=\"$LAN_POLICY\""
   [ -n "${WG_HUB_PUBKEY:-}" ] && echo "WG_HUB_PUBKEY=\"$WG_HUB_PUBKEY\""
+  true   # a trailing conditional must not leak its status
 } >> "$MOD_TMP/env"

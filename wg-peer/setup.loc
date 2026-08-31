@@ -35,7 +35,7 @@ if [ -z "${addr:-}" ]; then
   echo "Addresses already in use on network '$net':"
   if [ -f "$WGNET_DIR/$net.peers" ]; then
     while IFS='|' read -r name a key notes; do
-      name=$(echo "$name" | xargs); a=$(echo "$a" | xargs)
+      name=$(wgnet_trim "$name"); a=$(wgnet_trim "$a")
       [ -z "$name" ] && continue
       case "$name" in \#*) continue ;; esac
       printf '  %-14s %s\n' "$a" "$name"
@@ -52,7 +52,7 @@ fi
 # Refuse an address already claimed by a different peer.
 if [ -f "$WGNET_DIR/$net.peers" ]; then
   while IFS='|' read -r name a key notes; do
-    name=$(echo "$name" | xargs); a=$(echo "$a" | xargs)
+    name=$(wgnet_trim "$name"); a=$(wgnet_trim "$a")
     [ -z "$name" ] && continue
     case "$name" in \#*) continue ;; esac
     if [ "$a" = "$addr" ] && [ "$name" != "$tgt_host" ]; then
@@ -81,4 +81,5 @@ echo ""
   echo "WG_HUB_PUBKEY=\"$WG_HUB_PUBKEY\""
   echo "WG_ENDPOINT=\"$WG_ENDPOINT\""
   echo "PEER_ADDR=\"$addr\""
+  true   # a trailing conditional must not leak its status
 } >> "$MOD_TMP/env"

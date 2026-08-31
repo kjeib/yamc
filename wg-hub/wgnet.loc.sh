@@ -11,6 +11,15 @@
 # needs one authoritative home. This resolution has to happen locally: on the
 # remote side MOD_DIR is an sshfs mount and yamc.local does not exist at all.
 
+# Trim leading/trailing whitespace. Deliberately NOT 'xargs': xargs treats
+# quotes as syntax and aborts on an apostrophe, which comment lines have.
+wgnet_trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
 # ---------------------------------------------------------------------------
 # wgnet_dir - locate yamc.local/wgnet/
 #   1. -e wgnet_dir=/path        explicit override
@@ -139,8 +148,8 @@ wgnet_peers() {
   fi
 
   while IFS='|' read -r name addr key notes; do
-    name=$(echo "$name" | xargs); addr=$(echo "$addr" | xargs)
-    key=$(echo "$key"  | xargs); notes=$(echo "$notes" | xargs)
+    name=$(wgnet_trim "$name"); addr=$(wgnet_trim "$addr")
+    key=$(wgnet_trim "$key"); notes=$(wgnet_trim "$notes")
     [ -z "$name" ] && continue
     case "$name" in \#*) continue ;; esac
 
