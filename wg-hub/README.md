@@ -16,9 +16,9 @@ different config.
 
 ## Status
 
-**Scripts not yet written.** This directory currently holds documentation only,
-which is why it has no `setup` script (contrary to `AGENTS.md`). The design was
-reviewed first, deliberately.
+Built and in service. `bk0` runs on `uranus` for the `bkup` network, serving
+one peer (`orion`). See [`backup-box/README.md`](../backup-box/README.md) for
+what that network is for.
 
 ---
 
@@ -163,14 +163,78 @@ one peer never disturbs the others.
 
 **Policy** (every run), from `LAN_POLICY`:
 
-| Value | Effect |
-|---|---|
-| `none` | No forwarding rules at all for this interface |
-| `route:<host>` | Forward to that one host; `established,related` only in reverse |
-| `full` | Forward to the LAN |
+| Value | Forward chain | Input chain |
+|---|---|---|
+| `none` | drop both directions | tunnel may address only the hub `/32` |
+| `route:<host>` | that host may initiate; peers may only reply | tunnel may address only the hub `/32` |
+| `full` | forward to the LAN | unrestricted |
+
+See [Two Chains, Not One](#two-chains-not-one) for why the input chain is not
+optional.
 
 Rules go in a **named table of their own** so they are auditable and cannot be
 confused with Docker's chains or another WireGuard instance's.
+
+---
+
+## Two Chains, Not One
+
+The policy writes an **input** chain as well as a **forward** chain, and the
+input one is not decoration.
+
+Traffic from the tunnel aimed at one of the **hub's own addresses** is
+delivered locally: it traverses `INPUT` and never `FORWARD`. Peer-side
+`AllowedIPs` only limits what the peer routes, and hub-side `AllowedIPs` is a
+**source** check — neither constrains the destination. So with a forward chain
+alone, a rooted peer that widened its own config could reach every service on
+the hub's LAN address while the forward policy sat there looking correct.
+
+```
+chain input    iifname "bk0" ip daddr != 10.9.9.1 drop
+chain forward  per LAN_POLICY
+```
+
+`full` is exempt from the input rule: road-warrior clients legitimately address
+the hub's LAN IP.
+
+This was a real hole in this module until 2026-08-18, found only by testing
+from the peer rather than reading the hub's config. Verify with
+[`wg-peer probe`](../wg-peer/README.md#proving-the-isolation), never by
+inspection here.
+
+### Why priority 100
+
+Both chains hook at priority 100, after iptables' filter chains at priority 0.
+In netfilter an `ACCEPT` verdict means "this chain is done, continue to the
+next" — only `DROP` terminates. So an ACCEPT installed by Docker or another
+instance cannot override these drops; ours is the final word.
+
+The chain policy is `accept` and only this interface is restricted. A `drop`
+policy would break every other forwarding path on the host.
+
+---
+
+## The Key Handoff
+
+The hub generates its own keypair; the private half never leaves it. Peers need
+the public half, which lives in `<net>.conf` as `WG_HUB_PUBKEY`.
+
+```sh
+yamc -h uranus -e net=bkup wg-hub key             # print it
+yamc -h uranus -e net=bkup -e save=1 wg-hub key   # record it in <net>.conf
+```
+
+`-e save=1` is the only circumstance under which this module writes to
+`yamc.local` — that flag is the consent `AGENTS.md` requires. Without it the
+key is printed and nothing is written.
+
+It refuses to overwrite a **different** recorded key without `-e force=1`:
+every existing peer is built against the recorded key, so replacing it
+silently would break all of them at once.
+
+This subcommand exists because transcribing a 44-character base64 key by hand
+is a typo generator, and because reaching for `ssh` yourself leaves no trace in
+the yamc workflow.
 
 ---
 

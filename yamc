@@ -1154,10 +1154,18 @@ EOF
   log INFO "Running remote script: $SUBFUNC"
   log DEBUG "Remote command: cd $REMOTE_TMP && $ENV_EXPORTS ${RES_EXPORTS}MOD_DIR=$REMOTE_TMP MOD_TMP=$REMOTE_TMP/$RELATIVE_TMP bash $REMOTE_TMP/$SUBFUNC$MODULE_ARGS_STR"
 
-  if ! ssh -t -o ConnectTimeout="$SSH_TIMEOUT" "$SSH_USER@$HOST" "cd $REMOTE_TMP && $ENV_EXPORTS ${RES_EXPORTS}MOD_DIR=$REMOTE_TMP MOD_TMP=$REMOTE_TMP/$RELATIVE_TMP bash $REMOTE_TMP/$SUBFUNC$MODULE_ARGS_STR"; then
-    RESULT=$?
+  # NOTE: do not wrap this in 'if ! ssh ...'. Inside such a body $? is the
+  # status of the negation (always 0), so RESULT was always 0 and yamc exited
+  # 0 even when the remote script failed - which yamcity then treated as
+  # success and carried on past a broken step.
+  set +e
+  ssh -t -o ConnectTimeout="$SSH_TIMEOUT" "$SSH_USER@$HOST" "cd $REMOTE_TMP && $ENV_EXPORTS ${RES_EXPORTS}MOD_DIR=$REMOTE_TMP MOD_TMP=$REMOTE_TMP/$RELATIVE_TMP bash $REMOTE_TMP/$SUBFUNC$MODULE_ARGS_STR"
+  RESULT=$?
+  set -e
+
+  if [ "$RESULT" -ne 0 ]; then
     log ERROR "Remote script execution failed (exit $RESULT)"
-    exit $RESULT
+    exit "$RESULT"
   fi
 
   log INFO "Module '$MODULE' completed successfully on '$HOST'"

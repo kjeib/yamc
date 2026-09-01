@@ -564,45 +564,75 @@ tens of terabytes.
 
 ## Deployment Procedure
 
-Order matters. Steps 9 and 10 are the ones people skip and regret.
+Order matters. Steps 10–13 are the ones people skip and regret.
 
-1. **Audit uranus** — [Pre-Build Audit](#pre-build-audit-of-uranus). Do not skip.
-2. **Set up the hub** — `yamc -h uranus -e net=bkup` wg-hub (report), then again
-   with `-e yes=1`. See [Hub Setup](#hub-setup) for the manual equivalent.
-3. **Build Ubuntu to the basic profile** — the existing modules (`timezone`,
-   `pref`, `upgrade`, `packages`, `ssh2user`). Partitioning and any FDE
-   decision are already made by this point; this module does not revisit them.
-4. `yamc init -h orion -u kyle`
-5. `yamc -h orion backup-box storage` — report first, then `-e yes=1`. Claims
-   the free extents, creates `/srv/backup`.
-6. `yamc -h orion -e net=bkup` wg-peer — tunnel config. Prints a ready-to-paste
-   `bkup.peers` line containing the public key. **Paste it in.** Manual by design.
-7. `yamc -h uranus -e net=bkup -e yes=1` wg-hub — syncs the peer onto the live
-   interface.
-8. `yamc -h orion -e bk_users=uranus` backup-box — rest-server and repositories.
-   Prints the generated credential **once**; put it on the source host.
-9. **Prove the isolation from orion's side** —
-   `yamc -h orion -e net=bkup wg-peer probe`. Both targets must report
-   `blocked (correct)`. This tests the assertion the whole design
-   rests on, and it tests two *different* paths: a LAN host beyond the hub
-   (forward chain) and the hub's own LAN address (input chain). A config can
-   pass one and fail the other — that was a real hole here until 2026-08-18.
-   **A reachable probe means the box does not ship.**
-10. **Verify on the LAN**, then **seed on-site at LAN speed.** Terabytes over a
-   residential uplink is not a first run, it is a month.
-11. **Tunnel test from a foreign network.** Tether `orion` to a phone hotspot,
-    confirm the tunnel comes up unattended and a real incremental backup
-    completes. *Do this before the box leaves.* Otherwise the first genuine test
-    of dial-out happens at a location you cannot reach.
-12. **Ship it.** Verify from home — tunnel, a backup, a restore of one file.
-13. `yamc -h orion backup-box lockdown` — egress policy and service binding.
-    Applies with an **automatic revert** after 60 seconds; re-run with
-    `-e permanent=1` once you have confirmed you still have access.
-14. **Leave the rsync mirror running** until you have restored something real
+**Options precede the module name** — yamc's `getopts` stops at the first
+non-option argument, so `wg-hub -e net=bkup` silently loses the setting.
+
+1. **Audit the hub host** — [Pre-Build Audit](#pre-build-audit-of-uranus).
+2. **Set up the hub** — `yamc -h uranus -e net=bkup wg-hub` (reports and
+   prompts), then `-e yes=1`.
+3. **Record the hub key** — `yamc -h uranus -e net=bkup -e save=1 wg-hub key`.
+   Peers cannot be built until `WG_HUB_PUBKEY` is in `<net>.conf`.
+4. **Build Ubuntu to the basic profile** — `timezone`, `pref`, `upgrade`,
+   `packages`, `system base`. Skip `ntp`: `systemd-timesyncd` is adequate and
+   the module would point the box at a LAN server it cannot reach.
+5. `yamc init -h orion -u kyle`
+6. `yamc -h orion backup-box storage` — reports first, then `-e yes=1`.
+7. `yamc -h orion -e net=bkup -e addr=10.9.9.2 wg-peer` — generates the box's
+   keypair locally and brings the interface up. **No handshake yet is correct**;
+   the hub does not have the key.
+8. `yamc -h orion -e net=bkup -e save=1 wg-peer key` — records the peer line.
+9. `yamc -h uranus -e net=bkup -e yes=1 wg-hub` — syncs it live. Confirm with
+   `yamc -h orion -e net=bkup wg-peer status`; handshake under ~3 minutes.
+10. **Give the hub SSH access to the box.** `yamc init` ran from your
+    workstation, so only *its* key is on the box. With `LAN_POLICY=none` the
+    hub is the only machine that can reach the box once it leaves the LAN.
+    Install the hub's key, and accept the box's host key at its tunnel address
+    **only after comparing fingerprints against the known-good LAN path**:
+
+    ```sh
+    ssh root@BOX 'for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done'
+    ssh root@HUB 'ssh-keyscan -T5 10.9.9.2 | ssh-keygen -lf -'   # must match
+    ```
+
+    Then prove tunnel-only management: from the hub, reach the box at its
+    tunnel address without touching its LAN name.
+
+11. **Prove the isolation** — `yamc -h orion -e net=bkup wg-peer probe`. Both
+    targets must report `blocked (correct)`. This tests the assertion the whole
+    design rests on, across two different paths — a LAN host beyond the hub
+    (forward chain) and the hub's own LAN address (input chain). A config can
+    pass one and fail the other; that was a real hole here until 2026-08-18.
+    Run it on the bench, where a failure is cheapest to fix.
+    **A reachable probe means the box does not ship.**
+
+12. `yamc -h orion -e bk_users=uranus backup-box` — rest-server and
+    repositories. Prints the credential **once**; store it before continuing.
+    Then `restic init` each repository from the source.
+
+13. **Seed on the LAN, at LAN speed.** Terabytes over a residential uplink is
+    not a first run, it is a month.
+
+14. **Reboot test.** Confirm the box returns with `/srv/backup` mounted. You
+    edited `fstab` on a machine that is about to become unreachable; `mount -a`
+    is not the same test.
+
+15. **Foreign-network test.** Tether the box to a phone hotspot and confirm the
+    tunnel comes up unattended and a real incremental backup completes. Without
+    this, the first genuine test of dial-out happens somewhere you cannot reach.
+
+16. **Ship it**, then verify from home — tunnel, a backup, a restore of one file.
+
+17. `yamc -h orion backup-box lockdown` — egress policy. Applies with an
+    automatic revert after 60 seconds; re-run with `-e permanent=1` once you
+    have confirmed you still have access.
+
+18. **Leave the rsync mirror running** until you have restored something real
     from restic. Do not decommission on faith.
 
-> **Lockout warning.** Steps 4–12 need SSH over the LAN. Step 13 removes that.
-> Run it last, and only after step 11 proves the tunnel works from the box's
+> **Lockout warning.** Steps 5–16 need SSH over the LAN. Step 17 removes that.
+> Run it last, and only after step 16 proves the tunnel works from the box's
 > final location. The auto-revert exists because this step is where a mistake
 > costs you a phone call to your friend.
 
@@ -683,7 +713,7 @@ plus an offline copy. **A backup you cannot decrypt is not a backup.**
 If a box is stolen, sold, scavenged, or merely suspect:
 
 1. Delete its line from `yamc.local/wgnet/bkup.peers`.
-2. `yamc -h uranus -e net=bkup` wg-hub — `wg syncconf` removes the peer from
+2. `yamc -h uranus -e net=bkup wg-hub` — `wg syncconf` removes the peer from
    the live interface; its key is now inert. Other boxes are undisturbed.
 3. Rotate the rest-server credential for that source host.
 4. Assume its SSH host key is public; remove it from `known_hosts`.
