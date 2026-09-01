@@ -1,0 +1,79 @@
+#!/bin/bash
+# wg-hub/key - show, and optionally record, the hub's public key
+#
+# Usage:
+#   yamc -h HUB -e net=<name> wg-hub key             # print it
+#   yamc -h HUB -e net=<name> -e save=1 wg-hub key   # write it into <net>.conf
+#
+# LOCAL-ONLY subfunction. yamc.local exists only on this machine, so the file
+# that needs updating cannot be written by a remote script. Reading one public
+# key over ssh is the whole remote interaction.
+#
+# This exists because transcribing a 44-character base64 key by hand is a typo
+# generator, and because reaching for ssh yourself leaves no trace in the yamc
+# workflow. Writing to yamc.local happens ONLY with -e save=1 - that flag is
+# the consent AGENTS.md asks for.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/wgnet.loc.sh"
+
+wgnet_load "${net:-}" || exit 1
+
+CONF="$WGNET_DIR/$net.conf"
+
+PUB=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_user@$tgt_host" \
+        "cat /etc/wireguard/${WG_IFACE}.pub" 2>/dev/null)
+
+if [ -z "$PUB" ]; then
+  echo "ERROR: no public key at /etc/wireguard/${WG_IFACE}.pub on $tgt_host"
+  echo "       Has the hub been set up?  yamc -h $tgt_host -e net=$net wg-hub"
+  exit 1
+fi
+
+if ! [[ "$PUB" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+  echo "ERROR: '$PUB' is not a valid WireGuard public key"
+  exit 1
+fi
+
+echo ""
+echo "Hub public key ($tgt_host, interface $WG_IFACE):"
+echo "  $PUB"
+
+if [ "${save:-0}" != "1" ]; then
+  echo ""
+  echo "To record it in $net.conf:"
+  echo "  yamc -h $tgt_host -e net=$net -e save=1 wg-hub key"
+  echo ""
+  echo "Peers cannot be configured until it is there."
+  exit 0
+fi
+
+CURRENT=$(grep -E '^WG_HUB_PUBKEY=' "$CONF" | sed 's/^WG_HUB_PUBKEY="\(.*\)"$/\1/')
+
+if [ "$CURRENT" = "$PUB" ]; then
+  echo ""
+  echo "$net.conf already records this key. Nothing to do."
+  exit 0
+fi
+
+if [ -n "$CURRENT" ] && [ "${force:-0}" != "1" ]; then
+  echo ""
+  echo "ERROR: $net.conf already records a DIFFERENT key:"
+  echo "  recorded: $CURRENT"
+  echo "  actual:   $PUB"
+  echo ""
+  echo "  Every existing peer is built against the recorded key, so replacing"
+  echo "  it silently would break all of them at once. If the hub really was"
+  echo "  rekeyed, re-run with -e force=1 and then re-run wg-peer on every box."
+  exit 1
+fi
+
+if grep -qE '^WG_HUB_PUBKEY=' "$CONF"; then
+  sed -i "s|^WG_HUB_PUBKEY=.*|WG_HUB_PUBKEY=\"$PUB\"|" "$CONF"
+else
+  printf 'WG_HUB_PUBKEY="%s"\n' "$PUB" >> "$CONF"
+fi
+
+echo ""
+echo "Recorded in $CONF"
+grep -n '^WG_HUB_PUBKEY' "$CONF" | sed 's/^/  /'

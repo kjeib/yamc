@@ -21,6 +21,11 @@ SUBCOMMANDS
                          policy state. Read-only.
       yamc -h HUB -e net=bkup wg-hub status
 
+  key                    Show the hub's public key; -e save=1 records it in
+                         <net>.conf. Peers cannot be configured without it.
+      yamc -h HUB -e net=bkup wg-hub key
+      yamc -h HUB -e net=bkup -e save=1 wg-hub key
+
   -e net=NAME is REQUIRED. No default: the wrong one would apply a mobile
   network's policy to a backup network, or vice versa.
 
@@ -39,6 +44,26 @@ CONFIGURATION  (yamc.local/wgnet/<net>.conf and <net>.peers)
   Duplicate addresses are refused. WireGuard does not error on overlapping
   AllowedIPs - it silently reassigns the address to whichever peer was
   configured last, misrouting the other.
+
+TWO CHAINS, NOT ONE
+
+  The policy writes an INPUT chain as well as a FORWARD chain, and the input
+  one is not optional.
+
+  Traffic from the tunnel aimed at one of the HUB'S OWN addresses is delivered
+  locally: it traverses INPUT and never FORWARD. Peer-side AllowedIPs only
+  limits what the peer routes, and hub-side AllowedIPs is a SOURCE check -
+  neither constrains the destination. So with a forward chain alone, a rooted
+  peer that widened its own config could reach every service on the hub's LAN
+  address while the forward policy sat there looking correct.
+
+    chain input    iifname bk0 ip daddr != <hub tunnel addr> drop
+    chain forward  per LAN_POLICY below
+
+  'full' is exempt from the input rule: road-warrior clients legitimately
+  address the hub's LAN IP.
+
+  Verify from the peer side, not from here: 'wg-peer status' probes both paths.
 
 LAN_POLICY IS FAIL-CLOSED
 

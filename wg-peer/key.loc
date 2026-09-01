@@ -1,0 +1,91 @@
+#!/bin/bash
+# wg-peer/key - show, and optionally record, this peer's public key
+#
+# Usage:
+#   yamc -h BOX -e net=<name> wg-peer key             # print the peer line
+#   yamc -h BOX -e net=<name> -e save=1 wg-peer key   # append it to <net>.peers
+#
+# LOCAL-ONLY subfunction, for the same reason as wg-hub/key: yamc.local exists
+# only on this machine, so a remote script cannot write the peer table. The
+# private key never moves - only the public half is read.
+#
+# Writing to yamc.local happens ONLY with -e save=1.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/wgnet.loc.sh"
+
+wgnet_load "${net:-}" || exit 1
+
+PEERS="$WGNET_DIR/$net.peers"
+NAME="${name:-${tgt_host%%.*}}"
+
+read -r PUB ADDR < <(
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_user@$tgt_host" \
+    "cat /etc/wireguard/${WG_IFACE}.pub 2>/dev/null | tr -d '\n'; echo -n ' '; \
+     ip -4 -o addr show dev ${WG_IFACE} 2>/dev/null | awk '{print \$4}' | cut -d/ -f1" 2>/dev/null
+)
+
+if [ -z "$PUB" ]; then
+  echo "ERROR: no public key at /etc/wireguard/${WG_IFACE}.pub on $tgt_host"
+  echo "       Has the peer been set up?"
+  echo "         yamc -h $tgt_host -e net=$net -e addr=<address> wg-peer"
+  exit 1
+fi
+
+if ! [[ "$PUB" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+  echo "ERROR: '$PUB' is not a valid WireGuard public key"
+  exit 1
+fi
+
+[ -n "$ADDR" ] || ADDR="${addr:-}"
+if [ -z "$ADDR" ]; then
+  echo "ERROR: could not determine the tunnel address on $tgt_host."
+  echo "       The interface may be down. Pass -e addr=<address> explicitly."
+  exit 1
+fi
+
+LINE=$(printf '%-10s | %-12s | %s |' "$NAME" "$ADDR" "$PUB")
+
+echo ""
+echo "Peer line for $net.peers:"
+echo ""
+echo "  $LINE"
+
+if [ "${save:-0}" != "1" ]; then
+  echo ""
+  echo "To record it:"
+  echo "  yamc -h $tgt_host -e net=$net -e save=1 wg-peer key"
+  exit 0
+fi
+
+# Already present and identical?
+if grep -qF "$PUB" "$PEERS" 2>/dev/null; then
+  echo ""
+  echo "$net.peers already records this key. Nothing to do."
+  exit 0
+fi
+
+# A line for this name, but with a different key, means the box was rebuilt.
+EXISTING=$(grep -E "^[[:space:]]*$NAME[[:space:]]*\|" "$PEERS" 2>/dev/null || true)
+if [ -n "$EXISTING" ]; then
+  if [ "${force:-0}" != "1" ]; then
+    echo ""
+    echo "ERROR: $net.peers already has a line for '$NAME' with a different key:"
+    echo "  $EXISTING"
+    echo ""
+    echo "  That normally means the box was rebuilt and generated a new key."
+    echo "  Re-run with -e force=1 to replace the line."
+    exit 1
+  fi
+  sed -i "\|^[[:space:]]*$NAME[[:space:]]*||d" "$PEERS"
+  echo ""
+  echo "  (replacing the previous line for '$NAME')"
+fi
+
+printf '%s\n' "$LINE" >> "$PEERS"
+
+echo ""
+echo "Recorded in $PEERS"
+echo ""
+echo "Now sync it onto the hub:"
+echo "  yamc -h <hub> -e net=$net -e yes=1 wg-hub"

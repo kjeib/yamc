@@ -1,0 +1,113 @@
+#!/bin/bash
+# wg-peer/probe - actively prove this box cannot reach past the hub
+#
+# Usage: yamc -h BOX -e net=<name> wg-peer probe [-e yes=1]
+#
+# WHY THIS IS ACTIVE, NOT PASSIVE
+#
+# Simply trying to reach a LAN address proves nothing. Routing sends only the
+# hub's /32 through the tunnel, so such an attempt never touches the tunnel:
+# on your own LAN it succeeds via the local interface (false alarm), and at a
+# remote site it fails because the address is not routable there (false
+# reassurance - the dangerous one).
+#
+# A rooted box would add a route and widen its own AllowedIPs. So does this,
+# briefly, then puts everything back. The revert is trapped, so it happens
+# even on error or interrupt.
+#
+# TWO PATHS, and a config can pass one while failing the other:
+#   forward  a LAN host beyond the hub      -> the hub's forward chain
+#   input    one of the hub's OWN addresses -> traverses INPUT, never FORWARD
+#
+# Run this ON THE BENCH. A /32 route via the tunnel outranks the connected LAN
+# route, so the test is valid - and cheapest to fix - before the box ships.
+
+set -e
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+
+wg_banner probe
+wg_need_root
+
+ip link show "$WG_IFACE" >/dev/null 2>&1 || wg_die "$WG_IFACE is not up; nothing to probe"
+
+TARGETS=""
+[ -n "${WG_LAN_PROBE:-}" ]    && TARGETS="$TARGETS forward:$WG_LAN_PROBE"
+[ -n "${WG_HUB_LAN_ADDR:-}" ] && TARGETS="$TARGETS input:$WG_HUB_LAN_ADDR"
+[ -n "$TARGETS" ] || wg_die "Set WG_LAN_PROBE and/or WG_HUB_LAN_ADDR in the network config"
+
+ORIG_AIPS=$(wg show "$WG_IFACE" allowed-ips | awk -v k="$WG_HUB_PUBKEY" '$1==k{print $2}')
+[ -n "$ORIG_AIPS" ] || wg_die "Cannot read current AllowedIPs for the hub peer"
+
+echo
+echo "PLAN - simulate what a rooted box would attempt:"
+for spec in $TARGETS; do
+  echo "    ${spec%%:*} path -> ${spec#*:}"
+done
+echo
+echo "  For each target, TEMPORARILY:"
+echo "    ip route add <target>/32 dev $WG_IFACE"
+echo "    wg set $WG_IFACE peer <hub> allowed-ips $ORIG_AIPS,<target>/32"
+echo "  then attempt tcp/22 and ICMP, then put both back."
+echo
+echo "  Current AllowedIPs: $ORIG_AIPS   (restored on exit, even on error)"
+echo
+echo "  EVERY TARGET MUST BE UNREACHABLE. A success is a hole, not a"
+echo "  convenience, and the box must not be deployed until it is closed."
+
+wg_gate "run the isolation probe"
+
+restore() {
+  wg set "$WG_IFACE" peer "$WG_HUB_PUBKEY" allowed-ips "$ORIG_AIPS" 2>/dev/null || true
+  for spec in $TARGETS; do
+    ip route del "${spec#*:}/32" dev "$WG_IFACE" 2>/dev/null || true
+  done
+}
+trap restore EXIT INT TERM
+
+FAILED=0
+echo
+for spec in $TARGETS; do
+  path="${spec%%:*}"; target="${spec#*:}"
+  printf '  %-8s path  %-16s ' "$path" "$target"
+
+  ip route replace "$target/32" dev "$WG_IFACE" 2>/dev/null || true
+  wg set "$WG_IFACE" peer "$WG_HUB_PUBKEY" allowed-ips "$ORIG_AIPS,$target/32" 2>/dev/null || true
+
+  # Confirm the attempt actually goes via the tunnel; otherwise the result
+  # would be meaningless and reporting "blocked" would be a lie.
+  via=$(ip route get "$target" 2>/dev/null | head -1)
+  case "$via" in
+    *"dev $WG_IFACE"*) : ;;
+    *) echo "INCONCLUSIVE - not routed via $WG_IFACE"; echo "      ($via)"; continue ;;
+  esac
+
+  result="blocked (correct)"
+  if timeout 4 bash -c "</dev/tcp/$target/22" 2>/dev/null; then
+    result="*** REACHABLE on tcp/22 - ISOLATION IS NOT WORKING ***"; FAILED=1
+  elif ping -c1 -W2 "$target" >/dev/null 2>&1; then
+    result="*** PINGABLE - ISOLATION IS NOT WORKING ***"; FAILED=1
+  fi
+  echo "$result"
+
+  ip route del "$target/32" dev "$WG_IFACE" 2>/dev/null || true
+done
+
+restore
+trap - EXIT INT TERM
+
+echo
+echo "  AllowedIPs restored: $(wg show "$WG_IFACE" allowed-ips | awk -v k="$WG_HUB_PUBKEY" '$1==k{print $2}')"
+echo
+echo "===================================================================="
+if [ "$FAILED" -eq 0 ]; then
+  echo "PASS - this box cannot reach past the hub on any tested path."
+  echo "       Both the forward chain and the input chain are doing their job."
+else
+  echo "FAIL - DO NOT DEPLOY THIS BOX."
+  echo "       The hub's nft table needs BOTH an input and a forward chain."
+  echo "       Check on the hub:  nft list table inet wgnet_<net>"
+  exit 1
+fi
+echo "===================================================================="

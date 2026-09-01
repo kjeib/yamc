@@ -70,6 +70,15 @@ case "$LAN_POLICY" in
 esac
 
 echo
+if [ "$LAN_POLICY" != "full" ]; then
+  echo
+  echo "  Plus an INPUT restriction: traffic from $WG_IFACE may only be addressed"
+  echo "  to $WG_HUB_ADDR. Without it, packets aimed at this host's OTHER addresses"
+  echo "  (its LAN IP) traverse INPUT rather than FORWARD and the policy above"
+  echo "  never sees them - a rooted peer could reach every service here."
+fi
+
+echo
 echo "  Rules are written to $WG_NFT and applied by wg-quick PostUp, in a"
 echo "  table of their own ('inet $NFT_TABLE') at a late hook priority so they"
 echo "  are the final word over anything Docker or another instance installed."
@@ -120,7 +129,7 @@ HUB_PUB=$(cat "$WG_PUB")
 # ---------------------------------------------------------------------------
 case "$LAN_POLICY" in
   none)
-    POLICY_RULES="    iifname \"$WG_IFACE\" drop
+    FORWARD_RULES="    iifname \"$WG_IFACE\" drop
     oifname \"$WG_IFACE\" drop"
     ;;
   route:*)
@@ -132,16 +141,36 @@ case "$LAN_POLICY" in
     esac
     echo
     echo "Policy host $SRC_HOST resolves to $SRC_IP"
-    POLICY_RULES="    oifname \"$WG_IFACE\" ip saddr $SRC_IP accept
+    FORWARD_RULES="    oifname \"$WG_IFACE\" ip saddr $SRC_IP accept
     oifname \"$WG_IFACE\" drop
     iifname \"$WG_IFACE\" ct state established,related accept
     iifname \"$WG_IFACE\" drop"
     ;;
   full)
-    POLICY_RULES="    iifname \"$WG_IFACE\" accept
+    FORWARD_RULES="    iifname \"$WG_IFACE\" accept
     oifname \"$WG_IFACE\" accept"
     ;;
 esac
+
+# ---------------------------------------------------------------------------
+# INPUT restriction - closes a hole the forward chain cannot see.
+#
+# Traffic from the tunnel aimed at one of THIS HOST'S OWN addresses is
+# delivered locally: it traverses INPUT, never FORWARD. The peer-side
+# AllowedIPs only limits what the peer routes, and the hub-side AllowedIPs is
+# a SOURCE check - neither constrains the destination. So a rooted peer that
+# widens its own config and adds a route could reach every service on every
+# address of this host, e.g. 192.168.2.27, while the forward policy sat there
+# looking correct.
+#
+# Restrict tunnel traffic to the hub's tunnel address and nothing else.
+# 'full' is exempt: road-warrior clients legitimately address the hub's LAN IP.
+# ---------------------------------------------------------------------------
+if [ "$LAN_POLICY" = "full" ]; then
+  INPUT_RULES="    # policy 'full': no input restriction"
+else
+  INPUT_RULES="    iifname \"$WG_IFACE\" ip daddr != $WG_HUB_ADDR drop"
+fi
 
 # The create-then-delete preamble makes 'nft -f' idempotent: the delete cannot
 # fail on a host where the table does not exist yet.
@@ -154,9 +183,13 @@ table inet $NFT_TABLE
 delete table inet $NFT_TABLE
 
 table inet $NFT_TABLE {
+  chain input {
+    type filter hook input priority 100; policy accept;
+$INPUT_RULES
+  }
   chain forward {
     type filter hook forward priority 100; policy accept;
-$POLICY_RULES
+$FORWARD_RULES
   }
 }
 EOF

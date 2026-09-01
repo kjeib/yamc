@@ -44,30 +44,40 @@ the day you need it. Practice it before you need it.
 
 ---
 
-## Current State (2026-08-13)
+## Current State (2026-08-18)
 
 | Thing | Status |
 |---|---|
 | Design agreed | **Done** — this document |
 | Router forwards UDP 51822 → uranus | **Done** |
-| Pre-build audit of uranus | **NOT DONE** — mandatory, see below |
-| `wg-hub` / `wg-peer` | READMEs written, **scripts NOT WRITTEN** |
-| `backup-box` scripts | **Written, never run** — first target is `orion` |
+| Pre-build audit of uranus | **Done** — no `wg+` rules; wg-easy is `10.8.0.0/24`, no overlap; `ip_forward=1` as expected |
+| `wg-hub` / `wg-peer` modules | **Done** — built, and `wg-hub` run against uranus |
+| `bk0` hub on uranus | **Up** — `10.9.9.1/24`, port 51822, input + forward chains active, 0 peers |
+| `yamc.local/wgnet/bkup.{conf,peers}` | **Done** — hub public key recorded |
+| `backup-box storage` on orion | **Done** — 2.6 TB at `/srv/backup` |
+| `wg-peer` on orion | **NOT DONE** — orion has no tunnel; it is LAN-only |
+| `backup-box setup` (rest-server) | **NOT DONE** — refuses until the tunnel is up |
+| Isolation proven from the peer side | **NOT DONE** — mandatory, step 9 |
+| Reboot test on orion | **NOT DONE** — mandatory before shipping |
+| Tunnel test from a foreign network | **NOT DONE** — mandatory before shipping |
 | `backup` (source-side client) | **DEFERRED** — see [Why the client is deferred](#why-the-client-is-deferred) |
-| `orion` hardware | Ready — Ubuntu 24.04, 3 TB disk, ~2.9 TB unallocated in `ubuntu-vg` |
-| Tunnel tested from a foreign network | **NOT DONE** — mandatory before shipping |
 | Existing rsync mirror/cumulative | **Still running, do not decommission** |
 
-> This module directory currently has no `setup` script, which violates the
-> rule in `AGENTS.md`. That is deliberate and temporary — the design is being
-> reviewed before any script is written.
+**2026-08-18 — a hole that was open and is now closed.** The hub policy had only
+a `forward` chain. Traffic from the tunnel aimed at one of the hub's *own*
+addresses traverses `INPUT`, never `FORWARD`, and neither side's `AllowedIPs`
+constrains the destination — so a rooted peer could have reached every service
+on `uranus:192.168.2.27` while the forward policy looked correct. `wg-hub` now
+writes an input chain too, and `wg-peer status` probes both paths. This is why
+step 9 exists: the design has to be *tested* from the peer, not inferred from
+the hub's config.
 
 ---
 
 ## Pre-Build Audit of uranus
 
-**Do this before writing or running anything.** Two of these could silently
-defeat the entire isolation design.
+**Completed 2026-08-18 — results in Current State above.** Kept for the next
+host that hosts a network. Two of these can silently defeat the isolation.
 
 **1. Wildcard forward rules.** WireGuard PostUp examples very commonly use the
 `wg+` interface wildcard:
@@ -571,20 +581,27 @@ Order matters. Steps 9 and 10 are the ones people skip and regret.
    interface.
 8. `yamc -h orion -e bk_users=uranus` backup-box — rest-server and repositories.
    Prints the generated credential **once**; put it on the source host.
-9. **Verify on the LAN**, then **seed on-site at LAN speed.** Terabytes over a
+9. **Prove the isolation from orion's side** —
+   `yamc -h orion -e net=bkup wg-peer probe`. Both targets must report
+   `blocked (correct)`. This tests the assertion the whole design
+   rests on, and it tests two *different* paths: a LAN host beyond the hub
+   (forward chain) and the hub's own LAN address (input chain). A config can
+   pass one and fail the other — that was a real hole here until 2026-08-18.
+   **A reachable probe means the box does not ship.**
+10. **Verify on the LAN**, then **seed on-site at LAN speed.** Terabytes over a
    residential uplink is not a first run, it is a month.
-10. **Tunnel test from a foreign network.** Tether `orion` to a phone hotspot,
+11. **Tunnel test from a foreign network.** Tether `orion` to a phone hotspot,
     confirm the tunnel comes up unattended and a real incremental backup
     completes. *Do this before the box leaves.* Otherwise the first genuine test
     of dial-out happens at a location you cannot reach.
-11. **Ship it.** Verify from home — tunnel, a backup, a restore of one file.
-12. `yamc -h orion backup-box lockdown` — egress policy and service binding.
+12. **Ship it.** Verify from home — tunnel, a backup, a restore of one file.
+13. `yamc -h orion backup-box lockdown` — egress policy and service binding.
     Applies with an **automatic revert** after 60 seconds; re-run with
     `-e permanent=1` once you have confirmed you still have access.
-13. **Leave the rsync mirror running** until you have restored something real
+14. **Leave the rsync mirror running** until you have restored something real
     from restic. Do not decommission on faith.
 
-> **Lockout warning.** Steps 4–11 need SSH over the LAN. Step 12 removes that.
+> **Lockout warning.** Steps 4–12 need SSH over the LAN. Step 13 removes that.
 > Run it last, and only after step 11 proves the tunnel works from the box's
 > final location. The auto-revert exists because this step is where a mistake
 > costs you a phone call to your friend.

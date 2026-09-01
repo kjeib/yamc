@@ -65,6 +65,18 @@ else
   echo "  ping $WG_HUB_ADDR: no reply (the hub may simply not answer pings)"
 fi
 
+# Isolation is NOT tested here. A passive reachability check from this box
+# would be worse than nothing: routing sends only the hub /32 through the
+# tunnel, so such a test never exercises the tunnel at all - it passes on your
+# own LAN for the wrong reason and fails at a remote site for the wrong
+# reason. Proving it requires simulating what a rooted box would actually do.
+if [ -n "${WG_LAN_PROBE:-}" ] || [ -n "${WG_HUB_LAN_ADDR:-}" ]; then
+  echo
+  echo "--- isolation ------------------------------------------------------"
+  echo "  Not checked here. Run the active test:"
+  echo "    yamc -h $(hostname) -e net=$WGNET_NAME wg-peer probe"
+fi
+
 echo
 echo "--- re-resolve timer -----------------------------------------------"
 if systemctl list-timers "${RERESOLVE_UNIT}.timer" --no-pager 2>/dev/null | grep -q "$RERESOLVE_UNIT"; then
