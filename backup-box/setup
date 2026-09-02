@@ -10,8 +10,8 @@
 # Options:
 #   -e bk_users="a b"     rest-server users to create, one per source host
 #   -e bk_addr=10.9.9.2   bind address (default: read from the tunnel iface)
-#   -e rsrv_url=URL       release tarball, when no distribution package exists
-#   -e rsrv_sha256=HASH   REQUIRED with rsrv_url - see "Installing" below
+#   -e rsrv_url=URL       override the pinned release (needs rsrv_sha256 too)
+#   -e rsrv_sha256=HASH   its sha256; both must be supplied together
 
 set -e
 
@@ -58,6 +58,11 @@ echo
 echo "  Existing users keep their credentials; only missing users are created,"
 echo "  and their generated password is printed ONCE."
 
+if ! command -v rest-server >/dev/null 2>&1 && [ -f "$MOD_DIR/rest-server.pin" ]; then
+  echo
+  echo "    rest-server      : v$(grep -E '^RSRV_VERSION=' "$MOD_DIR/rest-server.pin" | cut -d= -f2) (pinned, checksum verified on download)"
+fi
+
 bk_gate "install and configure rest-server"
 
 # ---------------------------------------------------------------------------
@@ -78,43 +83,81 @@ elif apt-get install -y --dry-run rest-server >/dev/null 2>&1; then
   bk_run apt-get install -y rest-server
 else
   echo
-  echo "No distribution package for rest-server on this host."
-  if [ -z "${rsrv_url:-}" ] || [ -z "${rsrv_sha256:-}" ]; then
-    echo
-    echo "  Supply a pinned release and its checksum from the project's"
-    echo "  releases page:"
-    echo
-    echo "    -e rsrv_url=https://.../rest-server_x.y.z_linux_amd64.tar.gz \\"
-    echo "    -e rsrv_sha256=<sha256 from the release's checksum file>"
-    echo
-    echo "  The checksum is required, not optional. Verify it against the"
-    echo "  project's signed checksum file, not against the download itself."
-    exit 1
+  echo "No distribution package for rest-server; using the pinned release."
+
+  # ---- Resolve the release -------------------------------------------------
+  # Defaults come from backup-box/rest-server.pin, whose checksums were taken
+  # from the project's GPG-signed SHA256SUMS. -e rsrv_url / -e rsrv_sha256
+  # override it, but both must be given together: a URL without a checksum
+  # would silently install an unverified binary.
+  RSRV_URL="${rsrv_url:-}"
+  RSRV_SHA="${rsrv_sha256:-}"
+
+  if { [ -n "$RSRV_URL" ] && [ -z "$RSRV_SHA" ]; } || \
+     { [ -z "$RSRV_URL" ] && [ -n "$RSRV_SHA" ]; }; then
+    bk_die "-e rsrv_url and -e rsrv_sha256 must be given together"
   fi
 
-  # Work in a genuinely local temp dir. $MOD_TMP lives on the sshfs mount
-  # back to the yamc host, so downloading and extracting there would push the
-  # whole tarball over the network twice.
+  if [ -z "$RSRV_URL" ]; then
+    PIN="$MOD_DIR/rest-server.pin"
+    [ -f "$PIN" ] || bk_die "No pinned release: $PIN is missing"
+
+    RSRV_VERSION=$(grep -E '^RSRV_VERSION=' "$PIN" | cut -d= -f2)
+    RSRV_BASE=$(grep -E '^RSRV_BASE=' "$PIN" | cut -d= -f2)
+    ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+    RSRV_SHA=$(grep -E "^$ARCH\|" "$PIN" | cut -d'|' -f2)
+
+    if [ -z "$RSRV_SHA" ]; then
+      echo "  No pinned checksum for architecture '$ARCH'."
+      echo "  Architectures in $(basename "$PIN"):"
+      grep -E '^[a-z0-9]+\|' "$PIN" | cut -d'|' -f1 | sed 's/^/    /'
+      echo
+      echo "  Add one (see the header of that file for how to verify it), or"
+      echo "  pass -e rsrv_url=... -e rsrv_sha256=... explicitly."
+      exit 1
+    fi
+
+    RSRV_URL="$RSRV_BASE/v$RSRV_VERSION/rest-server_${RSRV_VERSION}_linux_${ARCH}.tar.gz"
+    echo "  version : $RSRV_VERSION  (pinned)"
+    echo "  arch    : $ARCH"
+  else
+    echo "  version : supplied on the command line"
+  fi
+  echo "  url     : $RSRV_URL"
+  echo "  sha256  : $RSRV_SHA"
+
+  # Work in a genuinely local temp dir. $MOD_TMP lives on the sshfs mount back
+  # to the yamc host, so downloading and extracting there would push the whole
+  # tarball over the network twice.
   WORK=$(mktemp -d /tmp/backup-box.XXXXXX)
   trap 'rm -rf "$WORK"' EXIT
 
   TARBALL="$WORK/rest-server.tar.gz"
-  echo "Downloading $rsrv_url"
-  bk_run curl -fsSL -o "$TARBALL" "$rsrv_url"
+  echo
+  echo "Downloading..."
+  bk_run curl -fsSL -o "$TARBALL" "$RSRV_URL"
 
   echo "Verifying checksum..."
   GOT=$(sha256sum "$TARBALL" | awk '{print $1}')
-  if [ "$GOT" != "$rsrv_sha256" ]; then
-    echo "    expected: $rsrv_sha256"
+  if [ "$GOT" != "$RSRV_SHA" ]; then
+    echo "    expected: $RSRV_SHA"
     echo "    got:      $GOT"
     bk_die "Checksum mismatch. Refusing to install."
   fi
   echo "    ok: $GOT"
 
   bk_run tar -xzf "$TARBALL" -C "$WORK"
-  BIN=$(find "$WORK" -type f -name 'rest-server' -perm -u+x | head -n1)
-  [ -n "$BIN" ] || bk_die "No 'rest-server' binary found in the tarball"
+
+  # The release tarball ships the binary mode 0644, so do NOT filter on the
+  # execute bit. Check the ELF magic instead - that is the property actually
+  # being asserted, and 'install -m 0755' sets the mode regardless.
+  BIN=$(find "$WORK" -type f -name 'rest-server' | head -n1)
+  [ -n "$BIN" ] || bk_die "No 'rest-server' file found in the tarball"
+  if [ "$(head -c4 "$BIN" | od -An -tx1 | tr -d ' \n')" != "7f454c46" ]; then
+    bk_die "$BIN is not an ELF executable"
+  fi
   bk_run install -m 0755 "$BIN" /usr/local/bin/rest-server
+  echo "    installed: $(/usr/local/bin/rest-server --version 2>&1 | head -1)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -129,6 +172,9 @@ fi
 bk_run mkdir -p "$BK_REPOS" "$BK_CONF_DIR"
 bk_run chown -R "$BK_SRV_USER:$BK_SRV_USER" "$BK_REPOS"
 bk_run chmod 700 "$BK_REPOS"
+# root:restsrv 750 - the service needs execute on the DIRECTORY to reach the
+# htpasswd inside it. Owning only the file is not enough.
+bk_run chown root:"$BK_SRV_USER" "$BK_CONF_DIR"
 bk_run chmod 750 "$BK_CONF_DIR"
 
 # ---------------------------------------------------------------------------
@@ -154,11 +200,33 @@ for u in $BK_USERS; do
   fi
   PW=$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 24)
   htpasswd -b "$BK_HTPASSWD" "$u" "$PW" >/dev/null 2>&1
-  NEW_CREDS="$NEW_CREDS$u	$PW\n"
+  NEW_CREDS="$NEW_CREDS$u\t$PW\n"
   echo "  user '$u': created"
 done
 chown root:"$BK_SRV_USER" "$BK_HTPASSWD"
 chmod 640 "$BK_HTPASSWD"
+
+# Print them NOW, not at the end. Anything that fails later - a service that
+# will not start, a lost connection - would otherwise leave the credential
+# stored in htpasswd but never shown, and the next run would report it as
+# already present. Unrecoverable, for no good reason.
+if [ -n "$NEW_CREDS" ]; then
+  echo
+  echo "===================================================================="
+  echo "NEW CREDENTIALS - shown once, not recoverable from this box:"
+  echo
+  printf '%b' "$NEW_CREDS" | while IFS=$'\t' read -r u p; do
+    [ -z "$u" ] && continue
+    echo "    user:     $u"
+    echo "    password: $p"
+    echo "    repo URL: rest:http://$u:$p@$LISTEN_ADDR:$BK_PORT/$u/<repo>"
+    echo
+  done
+  echo "  Put these on the SOURCE host, mode 0600. They are NOT the restic"
+  echo "  repository password - that is a separate secret which must never"
+  echo "  exist on this machine."
+  echo "===================================================================="
+fi
 
 # ---------------------------------------------------------------------------
 # systemd unit
@@ -214,22 +282,6 @@ echo
 echo "===================================================================="
 echo "rest-server active on $LISTEN_ADDR:$BK_PORT (append-only, private-repos)"
 echo "===================================================================="
-
-if [ -n "$NEW_CREDS" ]; then
-  echo
-  echo "NEW CREDENTIALS - shown once, not recoverable from this box:"
-  echo
-  printf '%b' "$NEW_CREDS" | while IFS=$'\t' read -r u p; do
-    [ -z "$u" ] && continue
-    echo "    user:     $u"
-    echo "    password: $p"
-    echo "    repo URL: rest:http://$u:$p@$LISTEN_ADDR:$BK_PORT/$u/<repo>"
-    echo
-  done
-  echo "  Put these on the SOURCE host, mode 0600. They are not the restic"
-  echo "  repository password - that is a separate secret which must never"
-  echo "  exist on this machine."
-fi
 
 echo
 echo "Next, from the source host, initialise the repositories:"

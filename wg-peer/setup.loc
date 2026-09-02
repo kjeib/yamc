@@ -7,6 +7,7 @@
 source "$MOD_DIR/wgnet.loc.sh"
 
 wgnet_load "${net:-}" || exit 1
+net="$WGNET_NAME"
 
 # The peer needs the hub's identity and where to dial. It does NOT read
 # LAN_POLICY: policy is enforced at the hub, and a peer that could opt itself

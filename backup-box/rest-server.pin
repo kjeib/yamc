@@ -1,0 +1,37 @@
+# Pinned rest-server release, by architecture.
+#
+# Ubuntu packages no distribution build under any name (checked 2026-08-18),
+# so the module downloads a release tarball. An unverified binary serving your
+# offsite backups is not a trade worth making, so every download is checked
+# against a checksum recorded here.
+#
+# These checksums were taken from the project's SHA256SUMS, whose detached
+# signature verified as a GOOD signature from:
+#
+#   CF8F 18F2 8445 7597 3F79  D4E1 91A6 868B D3F7 A907
+#   Alexander Neumann <alexander@bumpern.de>   (restic maintainer)
+#
+# The signing key was fetched from https://restic.net/gpg-key-alex.asc - an
+# independent channel from GitHub, which is what makes the check mean anything.
+#
+# ---------------------------------------------------------------------------
+# UPDATING THIS FILE  (do not shortcut the signature step)
+#
+#   V=0.15.0
+#   B=https://github.com/restic/rest-server/releases/download/v$V
+#   curl -fsSLO $B/SHA256SUMS -O $B/SHA256SUMS.asc
+#   curl -fsSL https://restic.net/gpg-key-alex.asc | gpg --import
+#   gpg --verify SHA256SUMS.asc SHA256SUMS      # must say "Good signature"
+#   grep linux_ SHA256SUMS
+#
+# Copying a checksum from the release page without verifying the signature
+# gives you no more assurance than downloading the binary unchecked.
+# ---------------------------------------------------------------------------
+
+RSRV_VERSION=0.14.0
+RSRV_BASE=https://github.com/restic/rest-server/releases/download
+
+# dpkg architecture | sha256 of rest-server_<version>_linux_<arch>.tar.gz
+amd64|4c9c95bc079a0334e81fad379b19dc5c3353c71c2c88d652cafce2081c2b1c66
+arm64|cef139cbe8b27b16bda731d17f093b0aa466b8c60b136c12d78b6f2bff3daf22
+386|de12ba817a8153be2ba4cbe6ae51ad2ca4c26d8210084659c1f421839bdb49c7

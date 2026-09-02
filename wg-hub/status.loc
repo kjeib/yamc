@@ -5,6 +5,7 @@
 source "$MOD_DIR/wgnet.loc.sh"
 
 wgnet_load "${net:-}" || exit 1
+net="$WGNET_NAME"
 wgnet_peers "$net" "$MOD_TMP/peers.tab" >/dev/null || exit 1
 
 {

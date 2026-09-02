@@ -9,6 +9,7 @@ Context for AI agents working on the YAMC codebase.
 | [README.md](README.md) | Full documentation, usage, architecture |
 | [LOCAL.md](LOCAL.md) | Local resources and profiles (`-p`, `-r` flags, `RES_DIR`) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Module development guide, patterns, debugging |
+| [BACKUP.md](BACKUP.md) | Offsite encrypted backup: design, threat model, runbooks |
 
 ## Key Files
 

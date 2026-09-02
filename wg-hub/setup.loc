@@ -11,6 +11,7 @@
 source "$MOD_DIR/wgnet.loc.sh"
 
 wgnet_load "${net:-}" || exit 1
+net="$WGNET_NAME"
 
 echo ""
 echo "  interface : $WG_IFACE"

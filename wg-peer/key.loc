@@ -15,6 +15,7 @@
 source "$MOD_DIR/wgnet.loc.sh"
 
 wgnet_load "${net:-}" || exit 1
+net="$WGNET_NAME"
 
 PEERS="$WGNET_DIR/$net.peers"
 NAME="${name:-${tgt_host%%.*}}"

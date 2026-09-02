@@ -8,7 +8,7 @@ Module: wg-peer - spoke side of a WireGuard network
   NAT, and re-resolves the hub's address when it changes.
 
   Generic. Nothing here is backup-specific. WHY a given network is configured
-  the way it is lives in backup-box/README.md.
+  the way it is lives in BACKUP.md.
 
 SUBCOMMANDS
 
@@ -136,5 +136,5 @@ INTERFACE NAMING
 SEE ALSO
 
   wg-hub                 the hub side
-  backup-box/README.md   system design and threat model
+  BACKUP.md              system design and threat model
 EOF

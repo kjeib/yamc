@@ -1,5 +1,10 @@
 #!/bin/bash
-# wg-hub/wgnet.loc.sh - LOCAL-side helpers: find and validate the network config
+# wgnet.loc.sh - LOCAL-side helpers: find and validate the network config
+#
+# SHARED between wg-hub and wg-peer. The real file lives in wg-hub/ and
+# wg-peer/wgnet.loc.sh is a symlink to it, because two copies of a validator
+# WILL drift the first time only one of them is patched. yamc has no
+# cross-module include path, so a symlink is the only way to have one file.
 #
 # Kept NON-EXECUTABLE on purpose (same reason as accounts/common.sh): yamc
 # treats executable files in a module directory as subcommands.
@@ -44,14 +49,19 @@ wgnet_find_dir() {
 # wgnet_load NET - source <net>.conf and validate it. Sets WGNET_DIR.
 # ---------------------------------------------------------------------------
 wgnet_load() {
-  local net="$1"
+  # The network can be named either way. '-p' is yamc's own flag for selecting
+  # a variant and reads better; '-e net=' is kept because it is explicit and
+  # already in use. Sets WGNET_NAME, which callers should use from here on -
+  # "$net" is empty when the name came from -p.
+  local net="${1:-${res_profile:-}}"
 
   if [ -z "$net" ]; then
-    echo "ERROR: no network specified. Use -e net=<name>."
+    echo "ERROR: no network specified. Use -p <name> or -e net=<name>."
     echo "       There is no default: the wrong one would apply a mobile"
     echo "       network's policy to a backup network, or vice versa."
     return 1
   fi
+  WGNET_NAME="$net"
 
   if ! WGNET_DIR="$(wgnet_find_dir)"; then
     echo "ERROR: cannot locate yamc.local/wgnet/."

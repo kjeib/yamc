@@ -5,6 +5,7 @@
 source "$MOD_DIR/wgnet.loc.sh"
 
 wgnet_load "${net:-}" || exit 1
+net="$WGNET_NAME"
 
 {
   echo "WGNET_NAME=\"$net\""

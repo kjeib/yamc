@@ -9,7 +9,7 @@ different config.
 
 > **Why the backup network is configured the way it is** — threat model,
 > isolation layers, why `LAN_POLICY=none` — lives in
-> [`backup-box/README.md`](../backup-box/README.md). This README covers
+> [`BACKUP.md`](../BACKUP.md). This README covers
 > mechanism only.
 
 ---
@@ -17,7 +17,7 @@ different config.
 ## Status
 
 Built and in service. `bk0` runs on `uranus` for the `bkup` network, serving
-one peer (`orion`). See [`backup-box/README.md`](../backup-box/README.md) for
+one peer (`orion`). See [`BACKUP.md`](../BACKUP.md) for
 what that network is for.
 
 ---
@@ -285,7 +285,7 @@ makes address spoofing structurally impossible rather than merely filtered.
 ## Before First Use
 
 Audit the host — see
-[Pre-Build Audit](../backup-box/README.md#pre-build-audit-of-uranus). On a host
+[Pre-Build Audit](../BACKUP.md#pre-build-audit-of-uranus). On a host
 already running another WireGuard instance, check for `wg+` wildcard rules,
 confirm `net.ipv4.ip_forward` is already on (so isolation cannot rest on it
 being off), and confirm the new subnet does not overlap an existing one.

@@ -8,7 +8,7 @@ Module: wg-hub - hub side of a WireGuard network
   a mobile/road-warrior network later, with different config and policy.
 
   WHY a given network is configured the way it is - threat model, isolation -
-  lives in backup-box/README.md. This module is mechanism only.
+  lives in BACKUP.md. This module is mechanism only.
 
 SUBCOMMANDS
 
@@ -142,5 +142,5 @@ BEFORE FIRST USE
 SEE ALSO
 
   wg-peer                the spoke side
-  backup-box/README.md   system design and threat model
+  BACKUP.md              system design and threat model
 EOF

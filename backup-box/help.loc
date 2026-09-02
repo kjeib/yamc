@@ -7,7 +7,7 @@ Module: backup-box - offsite backup box holding ciphertext only
   Provisions a box that lives on someone else's network and stores encrypted
   restic repositories it has no key for and cannot read.
 
-  RETURNING COLD? Read backup-box/README.md first - it is the design document
+  RETURNING COLD? Read BACKUP.md first - it is the design document
   for the whole backup system, not just this module. Short version:
 
     - The SOURCE encrypts before anything leaves the LAN. The repository

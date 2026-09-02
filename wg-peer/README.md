@@ -8,7 +8,7 @@ Generic on purpose. Nothing here is specific to backups.
 
 > **Why the backup network is configured the way it is** — threat model,
 > isolation layers, why the peer gets a `/32` and nothing else — lives in
-> [`backup-box/README.md`](../backup-box/README.md). This README covers
+> [`BACKUP.md`](../BACKUP.md). This README covers
 > mechanism only.
 
 ---
