@@ -1,0 +1,45 @@
+#!/bin/bash
+# backup/init - create the repositories on the backup box
+#
+# Usage: yamc -h uranus backup init [repo ...]
+#
+# Creating a repository writes new files, which append-only permits. Existing
+# repositories are left alone.
+
+set -e
+source "$MOD_DIR/common.sh"
+bk_banner init
+bk_need_root
+
+TARGETS="${*:-$(bk_repos)}"
+[ -n "$TARGETS" ] || bk_die "No repositories configured"
+
+FAILED=""
+for repo in $TARGETS; do
+  echo
+  echo "--- $repo ---"
+  bk_load "$repo" || { echo "  not configured here; run 'backup' first"; FAILED="$FAILED $repo"; continue; }
+
+  if restic cat config >/dev/null 2>&1; then
+    echo "  already initialised"
+    continue
+  fi
+
+  echo "  creating..."
+  if restic init --repository-version 2; then
+    echo "  ok - repository version 2 (zstd compression available)"
+  else
+    echo "  FAILED"
+    echo "    If this was refused rather than a network error, check the"
+    echo "    --private-repos path semantics on the box: the path must live"
+    echo "    under the rest-server user's own name."
+    FAILED="$FAILED $repo"
+  fi
+done
+
+echo
+if [ -n "$FAILED" ]; then
+  echo "Not initialised:$FAILED"
+  exit 1
+fi
+echo "All repositories ready. Seed on the LAN before the box is moved."

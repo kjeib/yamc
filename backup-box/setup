@@ -284,14 +284,33 @@ echo "rest-server active on $LISTEN_ADDR:$BK_PORT (append-only, private-repos)"
 echo "===================================================================="
 
 echo
-echo "Next, from the source host, initialise the repositories:"
-for u in $BK_USERS; do
-  for r in docs mail media; do
-    echo "    restic -r rest:http://$LISTEN_ADDR:$BK_PORT/$u/$r init --repository-version 2"
-  done
-  break
-done
+echo "===================================================================="
+echo "NEXT - and NOT on this machine."
+echo "===================================================================="
 echo
-echo "Note: repository creation writes new files, which append-only permits."
-echo "      If 'init' is refused, verify the --private-repos path semantics"
-echo "      against this rest-server version before working around it."
+echo "  This box stores encrypted blobs. It does not read them, and it does"
+echo "  not run restic - it only runs rest-server, which is already installed"
+echo "  here. restic belongs on the SOURCE, the machine holding the files"
+echo "  being backed up, because that is where the encryption happens and"
+echo "  where the repository password lives."
+echo
+for u in $BK_USERS; do
+  echo "  On $u  (apt-get install restic, if it is not there yet):"
+  echo
+  for r in docs mail media; do
+    echo "    restic -r rest:http://$u:<password>@$LISTEN_ADDR:$BK_PORT/$u/$r \\"
+    echo "           init --repository-version 2"
+  done
+  echo
+done
+echo "  \"repository\" here is restic's term for an encrypted backup store."
+echo "  Nothing to do with apt or package repositories - 'init' creates an"
+echo "  empty backup store under /srv/backup/repos on this box."
+echo
+echo "  Three stores rather than one: restic's index memory grows with the"
+echo "  number of chunks, and maildirs are millions of tiny files. Splitting"
+echo "  keeps that cost off the high-value data. See BACKUP.md."
+echo
+echo "  If 'init' is refused, check the --private-repos path semantics for"
+echo "  this rest-server version before working around it. Creating files is"
+echo "  what append-only permits, so init should succeed."

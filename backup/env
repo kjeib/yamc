@@ -1,0 +1,52 @@
+#!/bin/bash
+# backup/env - print the environment for driving restic by hand
+#
+# Usage: yamc -h uranus backup env <repo>
+#
+# There is deliberately no 'restore' subcommand. Restores are rare, varied and
+# consequential - the sort of thing better done deliberately with the real
+# tool than through a wrapper that hides which flags were used. What a wrapper
+# WOULD usefully save you is retyping the repository URL and password file, so
+# that is all this does.
+#
+# On the host:   eval "$(...)" then run restic normally.
+
+set -e
+source "$MOD_DIR/common.sh"
+
+REPO="$1"
+if [ -z "$REPO" ]; then
+  echo "Usage: backup env <repo>"
+  echo "Configured: $(bk_repos | tr '\n' ' ')"
+  exit 1
+fi
+bk_load "$REPO" || bk_die "'$REPO' is not configured on this host"
+
+cat <<EOF
+# Repository '$REPO'. Paste these into a root shell on $(hostname):
+
+export RESTIC_REPOSITORY='$RESTIC_REPOSITORY'
+export RESTIC_PASSWORD_FILE='$RESTIC_PASSWORD_FILE'
+
+# Then drive restic directly, e.g.
+#
+#   restic snapshots
+#   restic ls latest /home/kyle
+#   restic find '*budget*'
+#
+# Grab one file back:
+#   restic dump latest /home/kyle/notes.txt > /tmp/notes.txt
+#
+# Browse every snapshot as a directory tree - the closest equivalent to
+# walking the old cumulative volume, except the decryption happens here and
+# the box only ever sees ciphertext:
+#   mkdir -p /mnt/restore
+#   restic mount /mnt/restore          # ^C when done
+#   ls /mnt/restore/snapshots/
+#
+# Restore a subtree:
+#   restic restore latest --target / --include /home/kyle
+#
+# NOTE the repository URL contains the rest-server password. Do not paste the
+# output of this command anywhere it will be retained.
+EOF

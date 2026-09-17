@@ -1,0 +1,32 @@
+#!/bin/bash
+# backup/run - back up now, regardless of the schedule
+#
+# Usage: yamc -h uranus backup run [repo ...]
+#
+# Works whether or not BACKUP_ENABLED is set: the master switch governs cron
+# only. This is how you seed, and how you test.
+
+set -e
+source "$MOD_DIR/common.sh"
+bk_banner run
+bk_need_root
+
+[ -x "$BK_RUNNER" ] || bk_die "$BK_RUNNER not installed; run 'backup' first"
+
+TARGETS="${*:-$(bk_repos)}"
+FAILED=""
+for repo in $TARGETS; do
+  echo
+  echo "===== $repo ====="
+  bk_load "$repo" || { echo "  not configured here"; FAILED="$FAILED $repo"; continue; }
+  if "$BK_RUNNER" "$repo"; then
+    echo "  $repo: done"
+  else
+    echo "  $repo: FAILED"
+    FAILED="$FAILED $repo"
+  fi
+done
+
+echo
+[ -z "$FAILED" ] || { echo "Failed:$FAILED"; exit 1; }
+echo "All requested repositories backed up."

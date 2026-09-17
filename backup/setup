@@ -1,0 +1,207 @@
+#!/bin/bash
+# backup/setup - install restic and configure scheduled backups on the SOURCE
+#
+# Usage: yamc -h uranus backup [-e yes=1]
+#
+# This is the machine holding the files. It encrypts before anything leaves
+# the LAN, and it is the only place the repository passwords exist. The box at
+# the other end stores blobs it cannot read.
+
+set -e
+source "$MOD_DIR/common.sh"
+
+bk_banner setup
+bk_need_root
+
+REPO_LIST=$(bk_repos)
+[ -n "$REPO_LIST" ] || bk_die "No repositories configured"
+
+echo
+echo "PLAN:"
+echo "    restic client   : $(command -v restic >/dev/null 2>&1 && restic version 2>/dev/null | head -1 || echo 'to be installed')"
+echo "    repositories    : $(echo $REPO_LIST | tr '\n' ' ')"
+echo "    endpoint        : $BACKUP_ADDR:$BACKUP_PORT (user $BACKUP_USER)"
+echo "    config          : $BK_ETC/<repo>.env, mode 0600"
+echo "    schedule        : $BK_CRON  ($([ "$BACKUP_ENABLED" = yes ] && echo ACTIVE || echo 'installed but DISABLED'))"
+echo
+if [ "$BACKUP_ENABLED" != "yes" ]; then
+  echo "  BACKUP_ENABLED is '$BACKUP_ENABLED', so cron entries are written"
+  echo "  commented out. 'backup run' still works. Turn the schedule on with"
+  echo "  'backup enable' once this host holds the real data."
+  echo
+fi
+echo "  A repository password is generated here for each new repository and"
+echo "  printed ONCE. It never leaves this host and never reaches the box."
+
+if [ "${yes:-0}" != "1" ]; then
+  if [ -t 0 ]; then
+    read -r -p "Proceed? [y/N] " r
+    case "$r" in [yY]|[yY][eE][sS]) ;; *) echo "Aborted."; exit 0 ;; esac
+  else
+    echo; echo "REPORT ONLY. Re-run with -e yes=1."; exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# restic
+#
+# The distribution package is fine here: this is the client, on a machine you
+# control, and apt keeps it patched. (The box needed a pinned tarball only
+# because Ubuntu ships no rest-server at all.)
+# ---------------------------------------------------------------------------
+if ! command -v restic >/dev/null 2>&1; then
+  echo
+  echo "Installing restic..."
+  bk_run apt-get update -qq
+  bk_run apt-get install -y restic
+fi
+echo "    restic: $(restic version 2>/dev/null | head -1)"
+
+mkdir -p "$BK_ETC" "$BK_STATE"
+chmod 700 "$BK_ETC" "$BK_STATE"
+
+# ---------------------------------------------------------------------------
+# Credentials
+#
+# Two DIFFERENT secrets, and conflating them is the classic mistake:
+#
+#   rest-server password  - HTTP auth to the box. The box knows it.
+#   repository password   - encrypts the data. The box must NEVER know it.
+#
+# The second is the one that matters. Lose it and every byte on the box is
+# unrecoverable - that is the design working as intended, not a bug.
+# ---------------------------------------------------------------------------
+if [ -z "${bk_pass:-}" ] && [ ! -f "$BK_ETC/rest.pass" ]; then
+  echo
+  echo "ERROR: the rest-server password is not stored here yet."
+  echo "  It was printed once by 'backup-box' on $BACKUP_BOX. Supply it:"
+  echo "      yamc -h $(hostname) -e bk_pass='<password>' backup"
+  exit 1
+fi
+
+if [ -n "${bk_pass:-}" ]; then
+  printf '%s' "$bk_pass" > "$BK_ETC/rest.pass"
+  chmod 600 "$BK_ETC/rest.pass"
+  echo "    stored rest-server credential in $BK_ETC/rest.pass"
+fi
+REST_PASS=$(cat "$BK_ETC/rest.pass")
+
+NEW_PASSWORDS=""
+for repo in $REPO_LIST; do
+  PASSFILE="$BK_ETC/$repo.pass"
+  if [ ! -f "$PASSFILE" ]; then
+    head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32 > "$PASSFILE"
+    chmod 600 "$PASSFILE"
+    NEW_PASSWORDS="$NEW_PASSWORDS$repo\t$(cat "$PASSFILE")\n"
+  fi
+
+  cat > "$BK_ETC/$repo.env" <<EOF
+# Managed by yamc: backup. Repository '$repo'.
+RESTIC_REPOSITORY=rest:http://$BACKUP_USER:$REST_PASS@$BACKUP_ADDR:$BACKUP_PORT/$BACKUP_USER/$repo
+RESTIC_PASSWORD_FILE=$PASSFILE
+EOF
+  chmod 600 "$BK_ETC/$repo.env"
+
+  cp "$MOD_TMP/$repo.paths"   "$BK_ETC/$repo.paths"
+  cp "$MOD_TMP/$repo.exclude" "$BK_ETC/$repo.exclude"
+  chmod 644 "$BK_ETC/$repo.paths" "$BK_ETC/$repo.exclude"
+  echo "    $repo: config, paths and excludes written"
+done
+
+# Print new repository passwords immediately - a failure later must not leave
+# a password generated but never shown.
+if [ -n "$NEW_PASSWORDS" ]; then
+  echo
+  echo "===================================================================="
+  echo "REPOSITORY PASSWORDS - shown once."
+  echo
+  printf '%b' "$NEW_PASSWORDS" | while IFS=$'\t' read -r r p; do
+    [ -z "$r" ] && continue
+    printf '    %-8s %s\n' "$r" "$p"
+  done
+  echo
+  echo "  Stored here at $BK_ETC/<repo>.pass, mode 0600. They are NOT on the"
+  echo "  backup box and cannot be recovered from it."
+  echo
+  echo "  PUT THEM SOMEWHERE THAT SURVIVES LOSING THIS MACHINE - a password"
+  echo "  manager, and an offline copy. If this host and these files are gone"
+  echo "  at the same time, the backups are permanently unreadable."
+  echo "===================================================================="
+fi
+
+# ---------------------------------------------------------------------------
+# Runner + schedule
+# ---------------------------------------------------------------------------
+cat > "$BK_RUNNER" <<EOF
+#!/bin/bash
+# Managed by yamc: backup. One repository, one run.
+set -u
+repo="\$1"
+[ -f "$BK_ETC/\$repo.env" ] || { echo "no such repo: \$repo" >&2; exit 1; }
+set -a; . "$BK_ETC/\$repo.env"; set +a
+
+LIMIT=""
+[ -n "${BACKUP_LIMIT:-}" ] && LIMIT="--limit-upload ${BACKUP_LIMIT:-}"
+
+# Refuse if the repository does not answer. A missing repo must be an error,
+# not a quiet no-op - the lesson of the old BACKUP sentinel file.
+if ! restic cat config >/dev/null 2>&1; then
+  logger -t yamc-backup "\$repo: repository unreachable, skipping"
+  echo "\$repo: repository unreachable" >&2
+  exit 1
+fi
+
+start=\$(date +%s)
+# shellcheck disable=SC2086
+if restic backup --verbose \$LIMIT \\
+     --files-from "$BK_ETC/\$repo.paths" \\
+     --exclude-file "$BK_ETC/\$repo.exclude" \\
+     --tag yamc; then
+  date +%s > "$BK_STATE/\$repo.last"
+  logger -t yamc-backup "\$repo: ok in \$(( \$(date +%s) - start ))s"
+else
+  rc=\$?
+  logger -t yamc-backup "\$repo: FAILED rc=\$rc"
+  exit \$rc
+fi
+EOF
+chmod 755 "$BK_RUNNER"
+echo
+echo "Wrote $BK_RUNNER"
+
+{
+  echo "# Managed by yamc: backup. Edit yamc.local/backup/repos.tab, not this."
+  echo "SHELL=/bin/bash"
+  echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  echo "MAILTO=root"
+  echo
+  [ "$BACKUP_ENABLED" = "yes" ] || {
+    echo "# DISABLED: BACKUP_ENABLED=no in yamc.local/backup/backup.conf."
+    echo "# This host is not yet the live source. Enable with: backup enable"
+    echo
+  }
+  while IFS='|' read -r repo when keep; do
+    repo=$(echo "$repo" | tr -d ' '); when=$(echo "$when" | tr -d ' ')
+    [ -z "$repo" ] && continue
+    h="${when%%:*}"; m="${when##*:}"
+    pfx=""; [ "$BACKUP_ENABLED" = "yes" ] || pfx="#"
+    printf '%s%s %s * * * root %s %s\n' "$pfx" "$m" "$h" "$BK_RUNNER" "$repo"
+  done < "$MOD_TMP/repos.tab"
+} > "$BK_CRON"
+chmod 644 "$BK_CRON"
+echo "Wrote $BK_CRON"
+
+echo
+echo "===================================================================="
+if [ "$BACKUP_ENABLED" = "yes" ]; then
+  echo "Schedule ACTIVE:"
+else
+  echo "Schedule installed but DISABLED (BACKUP_ENABLED=no):"
+fi
+grep -vE '^[[:space:]]*($|SHELL|PATH|MAILTO)' "$BK_CRON" | sed 's/^/  /'
+echo "===================================================================="
+echo
+echo "Next:"
+echo "    yamc -h $(hostname) backup init         # create the repositories"
+echo "    yamc -h $(hostname) backup run home     # one repository, by hand"
+echo "    yamc -h $(hostname) backup status       # what is configured, when it last ran"

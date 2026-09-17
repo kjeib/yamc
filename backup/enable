@@ -1,0 +1,33 @@
+#!/bin/bash
+# backup/enable - activate the cron schedule
+#
+# Usage: yamc -h uranus backup enable
+#
+# Uncomments the entries in the installed crontab. This is the switch for
+# "this host is now the live source" - keep it off until it really holds the
+# data, or you will be backing up an incomplete copy over a good one.
+#
+# The state lives in the crontab itself, so it survives until something
+# changes it. Set BACKUP_ENABLED=yes in yamc.local/backup/backup.conf to make
+# it the default for future runs of 'backup setup'.
+
+set -e
+source "$MOD_DIR/common.sh"
+bk_banner enable
+bk_need_root
+
+[ -f "$BK_CRON" ] || bk_die "$BK_CRON not installed; run 'backup' first"
+
+sed -i 's/^#\([0-9].* root .*yamc-backup-run.*\)$/\1/' "$BK_CRON"
+sed -i '/^# DISABLED: BACKUP_ENABLED/d; /^# This host is not yet the live source/d' "$BK_CRON"
+
+echo
+echo "Schedule now ACTIVE:"
+grep -E 'yamc-backup-run' "$BK_CRON" | sed 's/^/  /'
+echo
+if grep -qE '^#.*yamc-backup-run' "$BK_CRON"; then
+  echo "  WARNING: some entries are still commented out:"
+  grep -E '^#.*yamc-backup-run' "$BK_CRON" | sed 's/^/    /'
+fi
+echo "Remember to set BACKUP_ENABLED=yes in yamc.local/backup/backup.conf,"
+echo "or the next 'backup setup' will write them commented out again."

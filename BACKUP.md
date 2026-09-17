@@ -12,7 +12,7 @@ module. The modules themselves have ordinary reference READMEs:
 | [`backup-box`](backup-box/README.md) | the box | Storage volume, rest-server, egress policy |
 | [`wg-hub`](wg-hub/README.md) | the hub | WireGuard interface, peers, LAN policy |
 | [`wg-peer`](wg-peer/README.md) | the box | Dial-out tunnel, keepalive, isolation probe |
-| `backup` | the source | restic client — **deferred**, see below |
+| [`backup`](backup/README.md) | the source | restic client, schedule, verification |
 
 ---
 

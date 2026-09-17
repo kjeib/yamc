@@ -1,0 +1,59 @@
+#!/bin/bash
+# backup/setup.loc - stage the client configuration from yamc.local/backup/
+#
+# Usage: yamc -h uranus backup [-e yes=1]
+
+if [ -z "$RES_DIR" ]; then
+  echo "ERROR: no resources directory. Expected yamc.local/backup/"
+  exit 1
+fi
+
+CONF="$RES_DIR/backup.conf"
+REPOS="$RES_DIR/repos.tab"
+[ -f "$CONF" ]  || { echo "ERROR: missing $CONF"; exit 1; }
+[ -f "$REPOS" ] || { echo "ERROR: missing $REPOS"; exit 1; }
+
+# shellcheck disable=SC1090
+source "$CONF"
+
+echo "Backup client configuration from $RES_DIR"
+echo "  box      : ${BACKUP_BOX:-?} at ${BACKUP_ADDR:-?}:${BACKUP_PORT:-8000}"
+echo "  user     : ${BACKUP_USER:-?}"
+echo "  schedule : ${BACKUP_ENABLED:-no}"
+echo ""
+
+# Strip comments/blanks so the remote side gets a clean table.
+grep -vE '^[[:space:]]*(#|$)' "$REPOS" > "$MOD_TMP/repos.tab"
+
+MISSING=""
+while IFS='|' read -r repo when keep; do
+  repo=$(echo "$repo" | tr -d ' ')
+  [ -z "$repo" ] && continue
+  for f in "$repo.paths" "$repo.exclude"; do
+    if [ -f "$RES_DIR/$f" ]; then
+      cp "$RES_DIR/$f" "$MOD_TMP/$f"
+    else
+      MISSING="$MISSING $f"
+    fi
+  done
+  n=$(grep -cvE '^[[:space:]]*(#|$)' "$RES_DIR/$repo.paths" 2>/dev/null || echo 0)
+  echo "  $repo: $n path(s), schedule $(echo "$when" | tr -d ' ')"
+done < "$MOD_TMP/repos.tab"
+
+if [ -n "$MISSING" ]; then
+  echo ""
+  echo "ERROR: missing resource files:$MISSING"
+  echo "  Each repository needs <repo>.paths and <repo>.exclude in $RES_DIR"
+  exit 1
+fi
+
+{
+  echo "BACKUP_ENABLED=\"${BACKUP_ENABLED:-no}\""
+  echo "BACKUP_BOX=\"${BACKUP_BOX:-}\""
+  echo "BACKUP_ADDR=\"${BACKUP_ADDR:-}\""
+  echo "BACKUP_PORT=\"${BACKUP_PORT:-8000}\""
+  echo "BACKUP_USER=\"${BACKUP_USER:-}\""
+  echo "BACKUP_LIMIT=\"${BACKUP_LIMIT:-}\""
+  echo "BACKUP_STALE_HOURS=\"${BACKUP_STALE_HOURS:-36}\""
+  true
+} >> "$MOD_TMP/env"

@@ -1,0 +1,87 @@
+#!/bin/bash
+# backup/status - what is configured, and whether it is actually running
+#
+# Usage: yamc -h uranus backup status
+#
+# This is the freshness alarm. It runs on the SOURCE deliberately: a backup
+# box must never be the thing reporting its own health, because a compromised
+# or wedged box is precisely the one that will claim to be fine.
+#
+# An encrypted repository is opaque - a silently failed backup looks exactly
+# like a working one. This report is what replaces being able to eyeball an
+# rsync mirror.
+
+set -e
+source "$MOD_DIR/common.sh"
+bk_banner status
+
+STALE_H="${BACKUP_STALE_HOURS:-36}"
+NOW=$(date +%s)
+PROBLEMS=0
+
+echo
+echo "--- client ---------------------------------------------------------"
+if command -v restic >/dev/null 2>&1; then
+  echo "  restic : $(restic version 2>/dev/null | head -1)"
+else
+  echo "  restic : NOT INSTALLED"; PROBLEMS=$((PROBLEMS+1))
+fi
+echo "  box    : ${BACKUP_BOX:-?} at ${BACKUP_ADDR:-?}:${BACKUP_PORT:-?}"
+
+echo
+echo "--- schedule -------------------------------------------------------"
+if [ -f "$BK_CRON" ]; then
+  ACTIVE=$(grep -cE '^[0-9].*yamc-backup-run' "$BK_CRON" || true)
+  OFF=$(grep -cE '^#[0-9].*yamc-backup-run' "$BK_CRON" || true)
+  if [ "${ACTIVE:-0}" -gt 0 ]; then
+    echo "  ACTIVE - $ACTIVE entr(ies)"
+  else
+    echo "  DISABLED - $OFF entr(ies) present but commented out"
+    echo "    Expected while this host is not yet the live source."
+    echo "    Turn on with: backup enable"
+  fi
+  grep -E 'yamc-backup-run' "$BK_CRON" | sed 's/^/    /'
+else
+  echo "  no crontab installed"; PROBLEMS=$((PROBLEMS+1))
+fi
+
+echo
+echo "--- repositories ---------------------------------------------------"
+printf '  %-8s %-10s %-22s %s\n' REPO STATE "LAST SUCCESS" SIZE
+for repo in $(bk_repos); do
+  if ! bk_load "$repo"; then
+    printf '  %-8s %-10s\n' "$repo" "UNCONFIG"; PROBLEMS=$((PROBLEMS+1)); continue
+  fi
+
+  stamp=$(bk_stamp "$repo")
+  if [ -f "$stamp" ]; then
+    last=$(cat "$stamp")
+    age_h=$(( (NOW - last) / 3600 ))
+    when=$(date -d "@$last" '+%Y-%m-%d %H:%M')
+    if [ "$age_h" -gt "$STALE_H" ]; then
+      state="STALE"; when="$when (${age_h}h)"; PROBLEMS=$((PROBLEMS+1))
+    else
+      state="ok"; when="$when (${age_h}h)"
+    fi
+  else
+    state="NEVER"; when="-"
+    [ "${ACTIVE:-0}" -gt 0 ] && PROBLEMS=$((PROBLEMS+1))
+  fi
+
+  size=$(restic stats --mode raw-data 2>/dev/null | awk '/Total Size/{print $3 $4}')
+  printf '  %-8s %-10s %-22s %s\n' "$repo" "$state" "$when" "${size:-unreachable}"
+done
+
+echo
+echo "--- verdict --------------------------------------------------------"
+if [ "$PROBLEMS" -eq 0 ]; then
+  echo "  No problems."
+  [ "${ACTIVE:-0}" -gt 0 ] || echo "  (schedule off by design - nothing is running yet)"
+else
+  echo "  $PROBLEMS problem(s) above."
+  echo
+  echo "  STALE or NEVER on an active schedule is the failure that matters."
+  echo "  An encrypted repository cannot be eyeballed; this is the only"
+  echo "  routine signal that the backups are real."
+  exit 1
+fi

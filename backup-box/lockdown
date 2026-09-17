@@ -23,6 +23,7 @@ bk_banner lockdown
 bk_need_root
 
 REVERT_AFTER="${revert_after:-60}"
+WG_PORT="${wg_port:-}"   # -e wg_port= overrides what is read from the interface
 PERMANENT="${permanent:-0}"
 
 command -v nft >/dev/null 2>&1 || {
@@ -36,9 +37,24 @@ LISTEN_ADDR=$(bk_tunnel_addr)
 
 # The hub endpoint this box must always be able to reach outbound. Read from
 # the running WireGuard config so it cannot drift from what the tunnel uses.
-WG_EP=$(wg show "$BK_IFACE" endpoints 2>/dev/null | awk '{print $2}' | head -n1)
-WG_PORT="${WG_EP##*:}"
-[ -n "$WG_PORT" ] || WG_PORT=51822
+# Read the port off the RUNNING tunnel. Do not guess: this value becomes the
+# egress rule that keeps the tunnel alive, so a wrong guess costs you the box -
+# and with -e permanent=1 there is no auto-revert to save you.
+if [ -z "$WG_PORT" ]; then
+  WG_EP=$(wg show "$BK_IFACE" endpoints 2>/dev/null | awk '{print $2}' | head -n1)
+  WG_PORT="${WG_EP##*:}"
+fi
+case "$WG_PORT" in
+  ''|*[!0-9]*)
+    echo "ERROR: cannot determine the tunnel's endpoint port from $BK_IFACE."
+    echo "       'wg show $BK_IFACE endpoints' gave: ${WG_EP:-(nothing)}"
+    echo
+    echo "  This port becomes the egress rule that keeps the tunnel up."
+    echo "  Guessing it would risk locking the box out permanently, so this"
+    echo "  stops instead. Bring the tunnel up, or pass -e wg_port=<port>."
+    exit 1
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Report

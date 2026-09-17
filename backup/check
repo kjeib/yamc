@@ -1,0 +1,36 @@
+#!/bin/bash
+# backup/check - verify repository integrity
+#
+# Usage: yamc -h uranus backup check [repo ...]
+#        yamc -h uranus -e data=1 backup check [repo ...]
+#
+# Structure only by default. With -e data=1 it also reads a 1/52 slice of the
+# actual pack files, so a year of weekly runs covers the whole repository at
+# about 2% of the cost per run. Reading everything at once would pull the
+# entire repository over the tunnel.
+
+set -e
+source "$MOD_DIR/common.sh"
+bk_banner check
+bk_need_root
+
+TARGETS="${*:-$(bk_repos)}"
+FAILED=""
+for repo in $TARGETS; do
+  echo
+  echo "--- $repo ---"
+  bk_load "$repo" || { echo "  not configured here"; continue; }
+  bk_reachable "$repo" || { FAILED="$FAILED $repo"; continue; }
+
+  if [ "${data:-0}" = "1" ]; then
+    week=$(( $(date +%V) % 52 + 1 ))
+    echo "  structure + data slice $week/52"
+    restic check --read-data-subset "$week/52" || FAILED="$FAILED $repo"
+  else
+    restic check || FAILED="$FAILED $repo"
+  fi
+done
+
+echo
+[ -z "$FAILED" ] || { echo "Problems in:$FAILED"; exit 1; }
+echo "All checked repositories are sound."

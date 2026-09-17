@@ -1,0 +1,22 @@
+#!/bin/bash
+# backup/disable - stop the cron schedule
+#
+# Usage: yamc -h uranus backup disable
+#
+# Comments out the entries. 'backup run' still works, so this stops the
+# automatic runs without taking away the ability to back up by hand.
+
+set -e
+source "$MOD_DIR/common.sh"
+bk_banner disable
+bk_need_root
+
+[ -f "$BK_CRON" ] || bk_die "$BK_CRON not installed; run 'backup' first"
+
+sed -i 's/^\([0-9].* root .*yamc-backup-run.*\)$/#\1/' "$BK_CRON"
+
+echo
+echo "Schedule DISABLED. Entries kept, commented out:"
+grep -E 'yamc-backup-run' "$BK_CRON" | sed 's/^/  /'
+echo
+echo "'backup run' still works. Re-activate with 'backup enable'."

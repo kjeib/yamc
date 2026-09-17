@@ -1,0 +1,104 @@
+#!/bin/bash
+# backup/help.loc - Module-specific help
+
+cat <<'HELP'
+Module: backup - restic client on the SOURCE host
+
+  Runs on the machine that HOLDS the files. It encrypts before anything
+  leaves the LAN and is the only place the repository passwords exist.
+
+  The other half is 'backup-box', on the machine that STORES the blobs. That
+  box runs rest-server, never restic, and holds no key.
+
+  RETURNING COLD? Read BACKUP.md - it is the design document for the whole
+  system. Short version:
+
+    - Two different secrets. The rest-server password is HTTP auth and the
+      box knows it. The REPOSITORY password encrypts the data and the box
+      must never know it. Lose the second and the backups are gone; that is
+      the design working, not a bug.
+    - One repository per data class: home, mail, media, root. Splitting keeps
+      index memory and prune cost off the high-value data - maildirs are
+      millions of tiny files.
+    - Paths and excludes come from yamc.local/backup/<repo>.{paths,exclude},
+      ported from the old diskback script.
+
+SUBCOMMANDS
+
+  setup                  Install restic, write config, install the schedule.
+                         Needs the rest-server password the first time.
+      yamc -h uranus -e bk_pass='<password>' backup
+      yamc -h uranus backup                          # later runs
+
+  init [repo ...]        Create the repositories on the box. Existing ones
+                         are left alone.
+      yamc -h uranus backup init
+
+  run [repo ...]         Back up now, whether or not the schedule is on.
+                         This is how you seed, and how you test.
+      yamc -h uranus backup run
+      yamc -h uranus backup run home
+
+  check [repo ...]       Verify integrity. Structure only by default.
+      yamc -h uranus backup check
+      yamc -h uranus -e data=1 backup check          # + a 1/52 data slice
+
+  snapshots [repo ...]   List what is stored.
+
+  status                 Configuration, schedule, and LAST SUCCESS per repo.
+                         This is the freshness alarm - see below.
+
+  env <repo>             Print the export lines for driving restic by hand.
+
+  enable / disable       Turn the cron schedule on or off.
+
+THE MASTER SWITCH
+
+  BACKUP_ENABLED in yamc.local/backup/backup.conf. While it is "no", the
+  crontab is installed with every entry commented out.
+
+  That is deliberate here: uranus is being built ahead of taking over from
+  sun and does not hold the real home directories yet. Backing up an
+  incomplete copy over a good one is worse than not backing up.
+
+    yamc -h uranus backup enable      # when uranus is the live source
+    yamc -h uranus backup disable
+
+  'backup run' ignores the switch, so you can seed and test meanwhile.
+
+WHY THERE IS NO 'restore'
+
+  Restores are rare, varied and consequential - better done deliberately with
+  the real tool than through a wrapper hiding which flags were used. What a
+  wrapper usefully saves is retyping the repository URL and password file, so
+  'backup env <repo>' prints exactly that and gets out of the way. It also
+  lists the commands worth knowing: dump, find, mount, restore.
+
+VERIFICATION IS THE POINT
+
+  An encrypted repository is opaque: a silently failed backup looks exactly
+  like a working one. You can no longer eyeball an rsync mirror, so:
+
+    - 'backup status' reports LAST SUCCESS per repository and fails if any
+      is stale. Run it from cron and read the mail.
+    - 'backup check -e data=1' weekly covers the whole repository in a year
+      at about 2% of the cost per run.
+    - Do a real restore twice a year. An untested backup is a hope.
+
+  All of this runs on the SOURCE. A backup box must never report its own
+  health: a compromised or wedged box is exactly the one that will claim to
+  be fine.
+
+PRUNE
+
+  Not a subcommand yet. Retention is recorded per repository in repos.tab,
+  but 'forget --prune' cannot run against an append-only server - it needs a
+  maintenance window in which append-only is relaxed on the box, then
+  restored. Quarterly, deliberate, never automatic: the append-only guarantee
+  is worth more than the disk space. See BACKUP.md.
+
+SEE ALSO
+
+  backup-box   the storage side
+  BACKUP.md    system design, threat model, runbooks
+HELP

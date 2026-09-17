@@ -1,0 +1,15 @@
+#!/bin/bash
+# backup/snapshots - list what is stored
+#
+# Usage: yamc -h uranus backup snapshots [repo ...]
+
+set -e
+source "$MOD_DIR/common.sh"
+bk_banner snapshots
+
+for repo in ${*:-$(bk_repos)}; do
+  echo
+  echo "--- $repo ---"
+  bk_load "$repo" || { echo "  not configured here"; continue; }
+  restic snapshots --compact 2>/dev/null | sed 's/^/  /' || echo "  unreachable"
+done
