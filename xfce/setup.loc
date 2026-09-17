@@ -7,3 +7,10 @@ if [ -f "$RES_DIR/gdmflexiserver" ]; then
   cp "$RES_DIR/gdmflexiserver" "$MOD_TMP/gdmflexiserver"
 fi
 
+# Copy locker selection if it exists in yamc.local
+# One line naming the screen locker to keep, e.g. "xfce4-screensaver".
+# Absent means the module's default (xfce4-screensaver) is used.
+if [ -f "$RES_DIR/locker" ]; then
+  echo "Locker selection: $(cat "$RES_DIR/locker")"
+  cp "$RES_DIR/locker" "$MOD_TMP/locker"
+fi

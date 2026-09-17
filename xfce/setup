@@ -60,7 +60,52 @@ if [ -f "$MOD_TMP/gdmflexiserver" ]; then
   chmod 755 /usr/local/bin/gdmflexiserver
 fi
 
-# 6. Ensure gnome-keyring unlocks on login (for password managers, etc.)
+# 6. Enforce a single screen locker
+#
+# xfce4-session Recommends:
+#   light-locker | xfce4-screensaver | xscreensaver | gnome-screensaver | mate-screensaver
+# apt satisfies that with the FIRST alternative, so light-locker gets pulled in
+# even when another locker was explicitly requested in packages/desktop.list.
+# The result is two lockers installed and both autostarted from
+# /etc/xdg/autostart -- and since both .desktop files carry NoDisplay=true,
+# neither appears in Settings > Session and Startup, so the conflict is
+# effectively invisible.
+#
+# They are not equivalent.  light-locker draws no lock screen; it VT-switches
+# to a throwaway lightdm greeter, so every unlock costs a greeter session
+# teardown (logind UserStopDelaySec, 10s by default) plus a full modeset on
+# every display.  xfce4-screensaver locks in place on the running X server.
+#
+# Override the choice with a one-line yamc.local/xfce/locker file.
+LOCKER=xfce4-screensaver
+if [ -f "$MOD_TMP/locker" ]; then
+  LOCKER=$(tr -d '[:space:]' < "$MOD_TMP/locker")
+fi
+
+echo "Enforcing a single screen locker: $LOCKER"
+
+# Install the keeper FIRST, so a bad name in yamc.local aborts here (set -e)
+# rather than after the other lockers have already been removed.
+if ! dpkg -s "$LOCKER" &> /dev/null; then
+  echo "  Installing $LOCKER..."
+  apt-get update -qq
+  apt-get install -y "$LOCKER"
+else
+  echo "  $LOCKER already installed"
+fi
+
+# Every locker this module knows about; the chosen one is skipped below.
+for pkg in light-locker light-locker-settings xfce4-screensaver xscreensaver \
+           gnome-screensaver mate-screensaver; do
+  # Keep the chosen locker and its companion settings package
+  case "$pkg" in "$LOCKER"|"$LOCKER"-settings) continue ;; esac
+  if dpkg -s "$pkg" &> /dev/null; then
+    echo "  Removing conflicting locker: $pkg"
+    apt-get remove -y "$pkg"
+  fi
+done
+
+# 7. Ensure gnome-keyring unlocks on login (for password managers, etc.)
 echo "Checking PAM configuration for gnome-keyring..."
 if [ -f /etc/pam.d/lightdm ]; then
   if grep -q "pam_gnome_keyring.so" /etc/pam.d/lightdm; then
@@ -74,7 +119,7 @@ if [ -f /etc/pam.d/lightdm ]; then
   fi
 fi
 
-# 7. Note about starting lightdm
+# 8. Note about starting lightdm
 echo ""
 echo "Configuration complete."
 echo ""

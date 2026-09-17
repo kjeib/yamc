@@ -15,7 +15,8 @@ Configures an Ubuntu system for graphical boot with XFCE desktop environment.
 3. **Sets graphical.target** - System boots to GUI instead of text console
 4. **Enables lightdm** - Display manager starts on boot
 5. **Installs gdmflexiserver** - Helper script for screen lock (if provided in yamc.local)
-6. **Configures PAM** - Ensures gnome-keyring unlocks on login
+6. **Enforces a single screen locker** - Installs the chosen locker and removes the others, so light-locker and xfce4-screensaver cannot both end up running
+7. **Configures PAM** - Ensures gnome-keyring unlocks on login
 
 ## Usage
 
@@ -52,6 +53,21 @@ dm-tool switch-to-greeter
 ```
 
 This will be installed to `/usr/local/bin/gdmflexiserver`.
+
+## Optional: Choosing the Screen Locker
+
+The module installs one locker and removes the others, defaulting to
+`xfce4-screensaver`. To choose a different one, put its package name on a
+single line in `yamc.local/xfce/locker`:
+
+```bash
+echo xfce4-screensaver > yamc.local/xfce/locker
+```
+
+Recognized alternatives: `xfce4-screensaver`, `light-locker`, `xscreensaver`,
+`gnome-screensaver`, `mate-screensaver`. The keeper is installed before the
+others are removed, so a typo aborts the run rather than leaving the host
+without any locker.
 
 ## Notes
 
@@ -105,10 +121,40 @@ apt install lightdm-gtk-greeter
 # Then re-run xfce module to configure it
 ```
 
-### Screen lock not working
+### Screen lock not working, or unlock takes 10-20 seconds
 
-Ensure xfce4-screensaver or xscreensaver is installed:
+Usually means more than one locker is installed. `xfce4-session` *Recommends*
+`light-locker | xfce4-screensaver | xscreensaver | gnome-screensaver |
+mate-screensaver`, and apt satisfies that with the first alternative, so
+light-locker arrives alongside whichever locker was actually requested. Both
+autostart from `/etc/xdg/autostart`, and because both `.desktop` files carry
+`NoDisplay=true`, neither appears in Settings > Session and Startup.
+
+Check what is installed and what is running:
 ```bash
-apt install xfce4-screensaver
+dpkg -l | grep -E 'light-locker|screensaver'
+ps -ef | grep -E 'light-locker|screensaver' | grep -v grep
+```
+
+Re-running this module removes every locker except the chosen one:
+```bash
+yamc -h host -u root xfce
+```
+
+A slow unlock specifically indicates light-locker won. It draws no lock screen;
+it VT-switches to a throwaway lightdm greeter, so each unlock pays a greeter
+session teardown (logind `UserStopDelaySec`, 10s by default) plus a full modeset
+on every display. `xfce4-screensaver` locks in place on the running X server.
+
+An already-running locker survives package removal until the user logs out.
+
+### Screen locks but the monitors never sleep
+
+Lock timeouts and DPMS are per-user xfconf settings and are not managed by this
+module. Check them from within the user's own session:
+```bash
+xfconf-query -c xfce4-screensaver -p /lock/enabled
+xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-off
+xset q | grep -A2 DPMS
 ```
 
