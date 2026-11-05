@@ -98,6 +98,18 @@ error, never a permissive default. Because this module is shared across
 networks, a feature added for a mobile network could otherwise silently loosen
 a backup network. This is the most security-relevant line in the module.
 
+Optional, narrowing the input restriction to specific ports on the hub:
+
+```sh
+# Unset:   peers may reach ANY service listening on the hub's tunnel address
+# none:    peers may only reply to connections the hub opened, and ping it
+# list:    only these ports, plus replies and ping
+WG_HUB_PORTS="tcp:10025 tcp:10587"
+```
+
+Same fail-closed rule: a malformed entry is a hard error, and combining it
+with `LAN_POLICY="full"` is refused. See [Hub Port Allowlist](#hub-port-allowlist).
+
 ### `<net>.peers`
 
 Pipe-delimited, same convention as `nfs-client/mounts.conf`:
@@ -201,6 +213,31 @@ This was a real hole in this module until 2026-08-18, found only by testing
 from the peer rather than reading the hub's config. Verify with
 [`wg-peer probe`](../wg-peer/README.md#proving-the-isolation), never by
 inspection here.
+
+### Hub Port Allowlist
+
+The input rule above confines a peer to the hub's tunnel address, but **not to
+any port on it**. Every service listening on all addresses (sshd, NFS, Samba,
+BIND, ...) is reachable from the tunnel. For a backup box you own that may be
+acceptable; for an internet-facing VPS such as the mail proxy, it is not.
+
+`WG_HUB_PORTS` adds, after the address rule:
+
+```
+iifname "mx0" ct state established,related accept      # replies to hub-initiated traffic
+iifname "mx0" icmp type echo-request accept             # wg-peer status pings the hub
+iifname "mx0" tcp dport { 10025, 10587 } accept         # omitted for 'none'
+iifname "mx0" drop
+```
+
+- **Unset** produces exactly the original ruleset, so existing networks do not change.
+- **`none`** suits a network where the hub always initiates. In `bkup`,
+  uranus pushes to the boxes and the boxes never need to open a connection
+  to uranus.
+- WireGuard's own UDP arrives on the physical interface, not the tunnel
+  interface, so no value here can cut the tunnel itself.
+
+`wg-peer probe` tests this too: a port outside the list must time out.
 
 ### Why priority 100
 

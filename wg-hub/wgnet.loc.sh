@@ -132,6 +132,48 @@ wgnet_load() {
       ;;
   esac
 
+  wgnet_check_ports || return 1
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# wgnet_check_ports - validate the optional WG_HUB_PORTS.
+#
+# Narrows the INPUT restriction from "tunnel may address only the hub" to
+# "tunnel may address only these ports on the hub". Unset keeps the original
+# behaviour, so existing networks are unaffected.
+#
+#   (unset)              any port on the hub's tunnel address
+#   none                 nothing the peer initiates; replies and ping only
+#   tcp:10025 udp:53 ... those ports, plus replies and ping
+#
+# Fail-closed like LAN_POLICY: a typo is an error, never a silent "allow all".
+# ---------------------------------------------------------------------------
+wgnet_check_ports() {
+  local p proto port
+  [ -n "${WG_HUB_PORTS:-}" ] || return 0
+
+  if [ "$LAN_POLICY" = "full" ]; then
+    echo "ERROR: WG_HUB_PORTS is set but LAN_POLICY is 'full'."
+    echo "       'full' has no input restriction to narrow. Unset one of them."
+    return 1
+  fi
+
+  [ "$WG_HUB_PORTS" = "none" ] && return 0
+
+  for p in $WG_HUB_PORTS; do
+    proto="${p%%:*}"; port="${p#*:}"
+    case "$proto" in tcp|udp) ;; *)
+      echo "ERROR: WG_HUB_PORTS entry '$p': protocol must be tcp or udp."
+      echo "       Format: \"tcp:10025 udp:53\", or \"none\"."
+      return 1 ;;
+    esac
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+      echo "ERROR: WG_HUB_PORTS entry '$p': port must be 1-65535."
+      return 1
+    fi
+  done
   return 0
 }
 

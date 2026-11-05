@@ -89,6 +89,10 @@ ISOLATION PROBE  ('wg-peer probe')
   here: a forward-only policy left every service on the hub's LAN address
   reachable.
 
+  If the network sets WG_HUB_PORTS, a third 'port' check connects to the
+  hub's tunnel address on a port outside the list (22 unless listed). It must
+  time out; a refusal also fails, because a RST means the packet got through.
+
   WHY IT IS ACTIVE. Merely trying to reach a LAN address proves nothing:
   routing sends only the hub /32 through the tunnel, so the attempt never
   touches the tunnel. It succeeds on your own LAN for the wrong reason, and

@@ -97,6 +97,44 @@ done
 restore
 trap - EXIT INT TERM
 
+# ---------------------------------------------------------------------------
+# Port path - the hub's tunnel address itself, outside WG_HUB_PORTS.
+#
+# No route games needed: the hub's /32 is already routed via the tunnel. A
+# blocked port times out (nft drops); a reachable one connects or is refused
+# (RST) - both mean the packet got through, so both are failures here.
+# ---------------------------------------------------------------------------
+if [ -n "${WG_HUB_PORTS:-}" ]; then
+  test_port=""
+  for p in 22 2049 445 53 111; do
+    case " $WG_HUB_PORTS " in *" tcp:$p "*) continue ;; esac
+    test_port=$p; break
+  done
+  printf '  %-8s path  %-16s ' "port" "$WG_HUB_ADDR:$test_port"
+  rc=0; timeout 4 bash -c "</dev/tcp/$WG_HUB_ADDR/$test_port" 2>/dev/null || rc=$?
+  case "$rc" in
+    124) echo "blocked (correct)" ;;
+    0)   echo "*** CONNECTED on tcp/$test_port - PORT ALLOWLIST NOT WORKING ***"; FAILED=1 ;;
+    *)   echo "*** REFUSED (packet reached the hub) - PORT ALLOWLIST NOT WORKING ***"; FAILED=1 ;;
+  esac
+
+  if [ "$WG_HUB_PORTS" != "none" ]; then
+    for p in $WG_HUB_PORTS; do
+      case "$p" in tcp:*) ;; *) continue ;; esac
+      port="${p#tcp:}"
+      printf '  %-8s       %-16s ' "allowed" "$WG_HUB_ADDR:$port"
+      rc=0; timeout 4 bash -c "</dev/tcp/$WG_HUB_ADDR/$port" 2>/dev/null || rc=$?
+      case "$rc" in
+        0)   echo "open" ;;
+        124) echo "no answer (allowlist or service problem - info only)" ;;
+        *)   echo "refused (reachable, nothing listening yet - info only)" ;;
+      esac
+    done
+  fi
+else
+  echo "  port     path  (skipped - WG_HUB_PORTS unset; any hub port is reachable by design)"
+fi
+
 echo
 echo "  AllowedIPs restored: $(wg show "$WG_IFACE" allowed-ips | awk -v k="$WG_HUB_PUBKEY" '$1==k{print $2}')"
 echo

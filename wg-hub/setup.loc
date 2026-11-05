@@ -18,6 +18,7 @@ echo "  interface : $WG_IFACE"
 echo "  address   : $WG_HUB_ADDR  (subnet $WG_SUBNET)"
 echo "  port      : $WG_PORT"
 echo "  policy    : $LAN_POLICY"
+echo "  hub ports : ${WG_HUB_PORTS:-(any)}"
 echo ""
 
 wgnet_peers "$net" "$MOD_TMP/peers.tab" || exit 1
@@ -29,6 +30,7 @@ wgnet_peers "$net" "$MOD_TMP/peers.tab" || exit 1
   echo "WG_SUBNET=\"$WG_SUBNET\""
   echo "WG_HUB_ADDR=\"$WG_HUB_ADDR\""
   echo "LAN_POLICY=\"$LAN_POLICY\""
+  echo "WG_HUB_PORTS=\"${WG_HUB_PORTS:-}\""
   [ -n "${WG_HUB_PUBKEY:-}" ] && echo "WG_HUB_PUBKEY=\"$WG_HUB_PUBKEY\""
   true   # a trailing conditional must not leak its status
 } >> "$MOD_TMP/env"

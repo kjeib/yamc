@@ -147,6 +147,13 @@ Targets come from `<net>.conf` and exercise two different paths:
 A configuration can pass one and fail the other — that is exactly what happened
 here, and only the second caught it.
 
+When the network sets `WG_HUB_PORTS`, a third **port** path runs: a TCP
+connection to the hub's tunnel address on a port outside the list (22, or the
+next unlisted of 2049/445/53/111) must time out. A refusal also fails, because
+a RST means the packet reached the hub. The listed TCP ports are then tried
+and reported as open / refused / no answer for information only, since the
+service behind them may not exist yet.
+
 ### Why the probe is active
 
 Simply *trying* to reach a LAN address proves nothing. Routing sends only the

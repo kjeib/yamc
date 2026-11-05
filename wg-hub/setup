@@ -76,6 +76,15 @@ if [ "$LAN_POLICY" != "full" ]; then
   echo "  to $WG_HUB_ADDR. Without it, packets aimed at this host's OTHER addresses"
   echo "  (its LAN IP) traverse INPUT rather than FORWARD and the policy above"
   echo "  never sees them - a rooted peer could reach every service here."
+  echo
+  case "${WG_HUB_PORTS:-}" in
+    "")   echo "  Hub ports: ANY. Peers may reach every service listening on"
+          echo "    $WG_HUB_ADDR. Set WG_HUB_PORTS to narrow this." ;;
+    none) echo "  Hub ports: NONE. Peers may only reply to connections this hub"
+          echo "    opened, and ping it. They cannot initiate to any service here." ;;
+    *)    echo "  Hub ports: ONLY $WG_HUB_PORTS on $WG_HUB_ADDR,"
+          echo "    plus replies to connections this hub opened, and ping." ;;
+  esac
 fi
 
 echo
@@ -172,11 +181,48 @@ else
   INPUT_RULES="    iifname \"$WG_IFACE\" ip daddr != $WG_HUB_ADDR drop"
 fi
 
+# ---------------------------------------------------------------------------
+# Optional port allowlist (WG_HUB_PORTS) - narrows the rule above from "only
+# the hub's tunnel address" to "only these ports on it". Without it, a peer
+# reaches every service listening on the hub: sshd, NFS, Samba, DNS, ...
+# Fine for a box you own; not for an internet-facing VPS.
+#
+# Order matters: the address rule above has already dropped anything not for
+# the hub, so these only ever see hub-addressed traffic.
+#   established,related  replies to connections the HUB opened (the hub must
+#                        still be able to ssh/fetch from the peer)
+#   icmp echo-request    so 'wg-peer status' can ping the hub
+# WireGuard's own UDP arrives on the physical interface, not $WG_IFACE, so
+# none of this can cut the tunnel itself.
+# ---------------------------------------------------------------------------
+if [ -n "${WG_HUB_PORTS:-}" ] && [ "$LAN_POLICY" != "full" ]; then
+  INPUT_RULES="$INPUT_RULES
+    iifname \"$WG_IFACE\" ct state established,related accept
+    iifname \"$WG_IFACE\" icmp type echo-request accept"
+  if [ "$WG_HUB_PORTS" != "none" ]; then
+    TCP_PORTS="" UDP_PORTS=""
+    for p in $WG_HUB_PORTS; do
+      case "$p" in
+        tcp:*) TCP_PORTS="${TCP_PORTS:+$TCP_PORTS, }${p#tcp:}" ;;
+        udp:*) UDP_PORTS="${UDP_PORTS:+$UDP_PORTS, }${p#udp:}" ;;
+        *) wg_die "Bad WG_HUB_PORTS entry '$p' (validation should have caught this)" ;;
+      esac
+    done
+    [ -n "$TCP_PORTS" ] && INPUT_RULES="$INPUT_RULES
+    iifname \"$WG_IFACE\" tcp dport { $TCP_PORTS } accept"
+    [ -n "$UDP_PORTS" ] && INPUT_RULES="$INPUT_RULES
+    iifname \"$WG_IFACE\" udp dport { $UDP_PORTS } accept"
+  fi
+  INPUT_RULES="$INPUT_RULES
+    iifname \"$WG_IFACE\" drop"
+fi
+
 # The create-then-delete preamble makes 'nft -f' idempotent: the delete cannot
 # fail on a host where the table does not exist yet.
 cat > "$WG_NFT" <<EOF
 #!/usr/sbin/nft -f
-# Managed by yamc: wg-hub (network '$WGNET_NAME', policy '$LAN_POLICY').
+# Managed by yamc: wg-hub (network '$WGNET_NAME', policy '$LAN_POLICY',
+# hub ports '${WG_HUB_PORTS:-any}').
 # Applied by wg-quick PostUp; removed by PostDown.
 
 table inet $NFT_TABLE

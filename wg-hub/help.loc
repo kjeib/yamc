@@ -38,6 +38,9 @@ CONFIGURATION  (yamc.local/wgnet/<net>.conf and <net>.peers)
   WG_HUB_PUBKEY printed on bootstrap; paste it in, peers need it
   WG_ENDPOINT   what peers dial (used by wg-peer)
   LAN_POLICY    none | route:<host> | full     REQUIRED, no default
+  WG_HUB_PORTS  optional: "tcp:10025 udp:53" | none | (unset = any port)
+                narrows the input rule to these ports on the hub, plus
+                replies to hub-initiated traffic and ping. Refused with 'full'.
 
   <net>.peers is pipe-delimited:   name | tunnel addr | public key | notes
 

@@ -14,6 +14,7 @@ net="$WGNET_NAME"
   echo "WG_ENDPOINT=\"${WG_ENDPOINT:-}\""
   echo "WG_LAN_PROBE=\"${WG_LAN_PROBE:-}\""
   echo "WG_HUB_LAN_ADDR=\"${WG_HUB_LAN_ADDR:-}\""
+  echo "WG_HUB_PORTS=\"${WG_HUB_PORTS:-}\""
   [ -n "${WG_HUB_PUBKEY:-}" ] && echo "WG_HUB_PUBKEY=\"$WG_HUB_PUBKEY\""
   true   # a trailing conditional must not leak its status
 } >> "$MOD_TMP/env"
