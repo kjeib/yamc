@@ -57,6 +57,11 @@ copy_if_changed() {
   fi
 }
 
+source "$MOD_DIR/common.sh"
+
+# Validate zones from source before installing anything
+check_source_zones
+
 echo "Checking for changes..."
 
 # Deploy named.conf
@@ -99,32 +104,6 @@ if ! named-checkconf "$BIND_CONF_DIR/named.conf"; then
   exit 1
 fi
 echo "Configuration syntax OK"
-
-# Check zone files
-if [ -f "$BIND_CONF_DIR/named.local" ]; then
-  zones=$(grep -E '^\s*zone\s+"[^"]+"' "$BIND_CONF_DIR/named.local" | sed 's/.*zone "\([^"]*\)".*/\1/' || true)
-  zone_errors=0
-  for zone in $zones; do
-    zonefile="$BIND_ZONE_DIR/$zone"
-    if [ -f "$zonefile" ]; then
-      echo "Checking zone: $zone"
-      if ! named-checkzone "$zone" "$zonefile"; then
-        echo "WARNING: Zone check failed for $zone"
-        zone_errors=$((zone_errors + 1))
-      fi
-    fi
-  done
-  
-  if [ $zone_errors -gt 0 ]; then
-    echo ""
-    echo "WARNING: $zone_errors zone(s) had errors."
-    read -p "Continue with restart anyway? (y/N) " confirm
-    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-      echo "Aborted. Service not restarted."
-      exit 1
-    fi
-  fi
-fi
 
 # Restart bind9 service
 echo ""

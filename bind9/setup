@@ -65,6 +65,10 @@ if [ -f "$BIND_CONF_DIR/named.conf" ] && [ ! -f "$BIND_CONF_DIR/named.conf.orig"
   cp "$BIND_CONF_DIR/named.conf" "$BIND_CONF_DIR/named.conf.orig"
 fi
 
+# Validate zones from source before installing anything
+source "$MOD_DIR/common.sh"
+check_source_zones
+
 # Deploy named.conf
 echo "Deploying named.conf..."
 cp "$RES_DIR/named.conf" "$BIND_CONF_DIR/named.conf"
@@ -87,6 +91,9 @@ if [ -d "$RES_DIR/zones" ]; then
   for zonefile in "$RES_DIR/zones/"*; do
     if [ -f "$zonefile" ]; then
       filename=$(basename "$zonefile")
+      case "$filename" in
+        *.bak|*.old|*.orig|*~) continue ;;
+      esac
       echo "  Copying $filename..."
       cp "$zonefile" "$BIND_ZONE_DIR/$filename"
       chown $BIND_USER:$BIND_GROUP "$BIND_ZONE_DIR/$filename"
@@ -102,19 +109,6 @@ if named-checkconf "$BIND_CONF_DIR/named.conf"; then
 else
   echo "ERROR: Configuration syntax check failed"
   exit 1
-fi
-
-# Check zone files if named.local defines them
-if [ -f "$BIND_CONF_DIR/named.local" ]; then
-  # Extract zone names and check them
-  zones=$(grep -E '^\s*zone\s+"[^"]+"' "$BIND_CONF_DIR/named.local" | sed 's/.*zone "\([^"]*\)".*/\1/' || true)
-  for zone in $zones; do
-    zonefile="$BIND_ZONE_DIR/$zone"
-    if [ -f "$zonefile" ]; then
-      echo "Checking zone: $zone"
-      named-checkzone "$zone" "$zonefile" || echo "WARNING: Zone check failed for $zone"
-    fi
-  done
 fi
 
 # Enable and start bind9 service
