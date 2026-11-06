@@ -1,0 +1,113 @@
+#!/bin/bash
+# mailserver/client.loc - mail client settings (local only, read-only)
+#
+# Usage:
+#   yamc -h uranus mailserver client          # generic settings
+#   yamc -h uranus mailserver client NAME     # for mailbox NAME, with its addresses
+#
+# Everything comes from yamc.local/mailserver (mail.conf, aliases), so this
+# needs no connection to the mail host. Safe to paste the output to a user.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/mailconf.loc.sh"
+
+name="${1:-}"
+if [ -n "$name" ] && ! [[ "$name" =~ ^[a-z0-9._-]+$ ]]; then
+  echo "ERROR: '$name' is not a valid mailbox name"; exit 1
+fi
+
+# The loaders print progress; show it only if something is wrong.
+tbl=$(mktemp)
+trap 'rm -f "$tbl"' EXIT
+if ! out=$(mc_load_store && mc_aliases "$tbl"); then
+  echo "$out"; exit 1
+fi
+# mc_load_store ran in the subshell above; load the values here too.
+mc_load_store >/dev/null || exit 1
+
+# Addresses delivered to NAME (bare local names such as 'root' are skipped).
+addrs=""
+if [ -n "$name" ]; then
+  addrs=$(awk -v n="$name" '$2 == n && $1 ~ /@/ {print $1}' "$tbl" | sort)
+  if [ -z "$addrs" ]; then
+    echo "ERROR: no address in yamc.local/mailserver/aliases delivers to mailbox '$name'."
+    echo "       Mailboxes: $(awk '$1 ~ /@/ {print $2}' "$tbl" | sort -u | tr '\n' ' ')"
+    exit 1
+  fi
+  primary=$(echo "$addrs" | grep -v -E '^(postmaster|abuse)@' | head -1)
+  [ -n "$primary" ] || primary=$(echo "$addrs" | head -1)
+fi
+
+user="${name:-<your mailbox name>}"
+email="${primary:-<you>@<one of: $MAIL_DOMAINS>}"
+size_mb=$(( MESSAGE_SIZE_LIMIT / 1048576 ))
+
+cat <<EOF
+
+Mail client settings${name:+ for $name}
+====================================================================
+
+  Your email address     $email
+  Username               $user        (just the name - not the email address)
+  Password               your MAIL password, set by the administrator
+                         (not your computer login password)
+
+  Incoming mail (IMAP)
+    Server               $MAIL_HOSTNAME
+    Port                 993
+    Connection security  SSL/TLS
+    Authentication       Normal password
+
+  Outgoing mail (SMTP)
+    Server               $MAIL_HOSTNAME
+    Port                 587
+    Connection security  STARTTLS
+    Authentication       Normal password
+    Username             $user        (same as incoming)
+
+  The server is $MAIL_HOSTNAME for every domain, at home or away.
+  POP3 is not offered; use IMAP. Port 25 is not for clients.
+  Largest message: about $size_mb MB including attachments (they grow ~35% when sent).
+EOF
+
+if [ -n "$name" ]; then
+  echo
+  echo "  Addresses delivered to this mailbox:"
+  echo "$addrs" | sed 's/^/    /'
+  if [ "$(echo "$addrs" | grep -c .)" -gt 1 ]; then
+    echo "  To send as one of the others, add it as an extra identity in the client."
+  fi
+fi
+
+cat <<'EOF'
+
+  Thunderbird
+    Account Settings -> Account Actions -> Add Mail Account. Enter name,
+    address and password, then choose "Configure manually" - automatic
+    setup guesses servers from your domain and often gets them wrong.
+    Enter the values above. The server creates Sent, Drafts, Trash and Spam
+    folders for you; in Account Settings -> Copies & Folders and
+    Junk Settings, point the client at them rather than local ones.
+
+  iPhone / iPad
+    Settings -> Apps -> Mail -> Mail Accounts -> Add Account -> Other ->
+    Add Mail Account. Choose IMAP, fill in both servers, and use the same
+    username and password for each. SSL is detected automatically.
+
+  Android (Gmail app or similar)
+    Add account -> Other -> Personal (IMAP). Enter the values above;
+    choose SSL/TLS for incoming and STARTTLS for outgoing.
+
+  If the client warns about the server's certificate, stop and tell the
+  administrator rather than accepting it: the certificate is a public one,
+  so a warning means something is wrong.
+EOF
+
+if [ -z "$name" ]; then
+  echo
+  echo "For one mailbox's settings and addresses:  yamc -h $tgt_host mailserver client <name>"
+fi
+if [ -n "$name" ]; then
+  echo
+  echo "(Admin: set or reset the password with  yamc -h $tgt_host mailserver user $name)"
+fi

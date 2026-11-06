@@ -39,6 +39,9 @@ grep -qw "$name" /etc/postfix/mailboxes 2>/dev/null \
 
 # -c creates or replaces. The realm must match smtpd_sasl_local_domain
 # (Postfix) and Cyrus's server name, both set to this host's name by setup.
-saslpasswd2 -c -u "$SASL_REALM" "$name"
-chown root:sasl /etc/sasldb2; chmod 640 /etc/sasldb2
+if ! saslpasswd2 -c -u "$SASL_REALM" "$name"; then
+  ms_die "password NOT set for $name (saslpasswd2 failed - mismatched entries?)"
+fi
+chown root:sasl /etc/sasldb2 && chmod 640 /etc/sasldb2 \
+  || ms_die "password set, but could not fix /etc/sasldb2 ownership - Postfix and Cyrus may not read it"
 echo "Password set for $name@$SASL_REALM."

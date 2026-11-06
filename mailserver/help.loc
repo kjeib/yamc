@@ -12,12 +12,14 @@ USAGE
   yamc -h uranus mailserver [-e yes=1]     report, then converge (idempotent)
   yamc -h uranus mailserver status         services, queue, cert expiry, DKIM, accounts
   yamc -h uranus mailserver dns            DNS rows to publish, and checks them (PASS/FAIL)
-  yamc -h uranus mailserver user [NAME]    list accounts / set NAME's password
+  yamc -h uranus mailserver user [NAME]    list accounts / set NAME's mail password
   yamc -h uranus -e delete=1 mailserver user NAME
+  yamc -h uranus mailserver client [NAME]  mail client settings to give a user (local)
   yamc -h uranus mailserver cert           pull the TLS cert now (the timer does it anyway)
   yamc -h uranus [-e save=1] mailserver key   show / record the cert-pull key (setup does it)
 
-  As a role, with the tunnel hub:  yamcity -h uranus [-e yes=1] yamc.local/profiles/mailserver
+  As a role, with the tunnel hub (from the yamc folder):
+    yamcity -h uranus [-e yes=1] ../yamc.local/profiles/mailserver
 
 CONFIGURATION  (yamc.local/mailserver/)
   mail.conf      public name, domains, LAN, gateway tunnel address, DKIM, limits
@@ -27,6 +29,12 @@ CONFIGURATION  (yamc.local/mailserver/)
 Each run ends with STILL TO DO: DKIM records to publish, missing passwords,
 tunnel not up, certificate not yet pulled. 'dns' and 'user' are operations,
 not configuration, so they stay separate commands.
+
+Mail passwords live in /etc/sasldb2 on this host, separate from login
+passwords (pwsync does not touch them). Clients use the public name
+(MAIL_HOSTNAME) for every domain: IMAP 993 SSL/TLS, SMTP 587 STARTTLS -
+see 'client'.
+The gateway's own DNS (HELO SPF, reverse DNS): 'mailgate test' on it.
 
 Build and deploy order (store + gateway): yamc.local/mailserver/README.md
 EOF

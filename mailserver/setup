@@ -234,9 +234,12 @@ autocreate_sieve_script|$MS_ETC/default.sieve
 EOF
 
 # cyrus.conf: one managed block inside SERVICES { } for the gateway listener,
-# and the unused POP3/NNTP services switched off. awk rewrite, then compare.
+# and the unused POP3/NNTP/HTTP (CalDAV) services switched off. Any other
+# service whose program is not installed is switched off too: Cyrus master
+# refuses to start at all if one is missing (Ubuntu enables http, whose httpd
+# is in the separate cyrus-caldav package). awk rewrite, then compare.
 CY_TMP=$(mktemp)
-awk -v gw="$GW_IMAPS" '
+awk -v gw="$GW_IMAPS" -v bindir="/usr/lib/cyrus/bin" '
   /# BEGIN yamc mailserver/ { skip = 1; next }
   /# END yamc mailserver/   { skip = 0; next }
   skip { next }
@@ -248,7 +251,13 @@ awk -v gw="$GW_IMAPS" '
     insvc = 1; next
   }
   insvc && /^\}/ { insvc = 0 }
-  insvc && /^[[:space:]]*(pop3|pop3s|nntp|nntps)[[:space:]]/ { print "#yamc-off# " $0; next }
+  insvc && /^[[:space:]]*(pop3|pop3s|nntp|nntps|http|https)[[:space:]]/ { print "#yamc-off# " $0; next }
+  insvc && /^[[:space:]]*[a-z0-9]+[[:space:]]+cmd="/ {
+    prog = $0; sub(/.*cmd="/, "", prog); sub(/[ "].*/, "", prog)
+    if (prog !~ /^\// && system("test -x \"" bindir "/" prog "\"") != 0) {
+      print "#yamc-off (no " prog ")# " $0; next
+    }
+  }
   { print }' /etc/cyrus.conf > "$CY_TMP"
 ms_put /etc/cyrus.conf 644 < "$CY_TMP" && CHANGED_CY=true || true
 rm -f "$CY_TMP"

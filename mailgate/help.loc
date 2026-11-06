@@ -14,9 +14,11 @@ built by the 'mailserver' module. Holds no mail and no passwords:
 USAGE
   yamc -h kjeib.com mailgate [-e yes=1]   report, then converge (idempotent)
   yamc -h kjeib.com mailgate status       services, tunnel, cert, queue, bounces
-  yamc -h kjeib.com mailgate test         outbound 25, PTR, listeners, open-relay check
+  yamc -h kjeib.com mailgate test         outbound 25, reverse DNS, HELO SPF, listeners,
+                                          open-relay check (sends no mail)
 
-  As a role, with the tunnel peer:  yamcity -h kjeib.com [-e yes=1] yamc.local/profiles/mailgate
+  As a role, with the tunnel peer (from the yamc folder):
+    yamcity -h kjeib.com [-e yes=1] ../yamc.local/profiles/mailgate
 
 CONFIGURATION  (yamc.local/mailgate/)
   mailgate.conf  public IP, HELO name, certificate names, outbound mode, limits
@@ -28,6 +30,12 @@ PREREQUISITES
   - The WireGuard peer has run on this host (it records the peers line)
   - Ports 80/25/587/993 free; ufw disabled
   - Every name in CERT_NAMES has an A record pointing at GATE_PUBLIC_IP
+
+Certificate: certbot.timer renews it here; the store's cert-pull timer
+fetches it over the tunnel (hourly until the first, then daily).
+
+If 'test' shows outbound 25 blocked, the hosting provider is filtering it
+(DigitalOcean does on many accounts): ask them to lift it, or use a relay.
 
 Switching outbound to a relay: set OUTBOUND / RELAY_HOST / RELAY_DOMAINS in
 mailgate.conf, put RELAY_USER / RELAY_PASS in relay.secret, re-run mailgate.

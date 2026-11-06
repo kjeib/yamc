@@ -25,9 +25,10 @@ command). Dry-run (report mode) verified against uranus; **not yet applied**.
 ```sh
 yamc -h uranus mailserver [-e yes=1]          # report, then converge
 yamc -h uranus mailserver status              # services, queue, cert expiry, DKIM, accounts
-yamc -h uranus mailserver dns                 # DNS rows per domain + what DNS has now
-yamc -h uranus mailserver user [NAME]         # list accounts / set a password
+yamc -h uranus mailserver dns                 # DNS rows per domain, checked: OK/FAIL, RESULT: PASS
+yamc -h uranus mailserver user [NAME]         # list accounts / set a mail password (sasldb)
 yamc -h uranus -e delete=1 mailserver user NAME
+yamc -h uranus mailserver client [NAME]       # client settings to give a user (local, no SSH)
 yamc -h uranus mailserver cert                # pull the TLS cert now (optional; the timer does it)
 yamc -h uranus [-e save=1] mailserver key     # show / record the cert-pull key (setup does it)
 ```
