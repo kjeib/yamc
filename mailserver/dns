@@ -3,9 +3,10 @@
 #
 # Usage: yamc -h uranus mailserver dns
 #
-# Read-only. Prints Namecheap-style rows (Type / Host / Value) per domain, and
-# checks what public DNS currently returns for each, so you can see what is
-# still to do. DKIM values come from the keys on this host.
+# Read-only. Prints Namecheap-style rows (Type / Host / Value) per domain, then
+# checks public DNS against them: OK / FAIL per record (MX, SPF, DKIM key
+# matches this host's, DMARC, and the mail host's A record), ending with
+# RESULT: PASS or the number of problems. DKIM values come from the keys here.
 
 # shellcheck disable=SC1091
 source "$MOD_DIR/common.sh"
@@ -16,7 +17,14 @@ ms_need_root
 # shellcheck disable=SC1090
 . "$MS_CONF"
 
-pub() { dig +short "$1" "$2" @1.1.1.1 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
+# txt NAME - one line per TXT record, its quoted chunks joined
+txt() { dig +short TXT "$1" @1.1.1.1 2>/dev/null | sed 's/" "//g; s/^"//; s/"$//'; }
+# dkim_p RECORD - the p= key value, without whitespace
+dkim_p() { echo "$1" | tr -d ' \t' | grep -oE '(^|;)p=[^;]*' | head -1 | sed 's/.*p=//'; }
+
+FAILS=0
+ok()  { printf '    OK    %-6s %s\n' "$1" "$2"; }
+bad() { printf '    FAIL  %-6s %s\n' "$1" "$2"; FAILS=$((FAILS + 1)); }
 
 # The gateway's address comes from yamc.local/mailgate/mailgate.conf. Without
 # that file, fall back to what public DNS says the mail name points at.
@@ -31,6 +39,10 @@ if [ "$OUTBOUND" = relay ] || [ -n "$RELAY_DOMAINS" ]; then
   SPF="$SPF include:<your relay provider's SPF domain>"
 fi
 SPF="$SPF ~all"
+
+ip_ok=false
+[[ "$GATE_PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && ip_ok=true
+want_mx=$(echo "$MAIL_HOSTNAME" | tr '[:upper:]' '[:lower:]')
 
 # For a domain, 'host' is relative to the zone Namecheap manages. A subdomain
 # such as test.batemans.org lives in the batemans.org zone with host 'test'.
@@ -53,16 +65,90 @@ for d in $MAIL_DOMAINS; do
   printf '  %-11s %-26s %s\n' "TXT Record" "$DKIM_SELECTOR._domainkey$sfx" "${dk:-<no key yet - run setup>}"
   printf '  %-11s %-26s %s\n' "TXT Record" "_dmarc$sfx" "v=DMARC1; p=none; rua=mailto:postmaster@$d"
   echo
-  echo "  Public DNS now:"
-  echo "    MX     $(pub MX "$d")"
-  echo "    SPF    $(pub TXT "$d" | grep -o '"v=spf1[^"]*"' || true)"
-  echo "    DKIM   $( [ -n "$(pub TXT "$DKIM_SELECTOR._domainkey.$d")" ] && echo present || echo missing)"
-  echo "    DMARC  $(pub TXT "_dmarc.$d")"
+  echo "  Public DNS now (via 1.1.1.1):"
+
+  # MX: every MX must name the mail host, or some senders deliver elsewhere.
+  hosts=$(dig +short MX "$d" @1.1.1.1 2>/dev/null | awk '{print tolower($2)}' | sed 's/\.$//' | sort -u)
+  others=$(echo "$hosts" | grep -vxF "$want_mx" | tr '\n' ' ' | sed 's/ $//' || true)
+  if [ -z "$hosts" ]; then
+    bad MX "none published"
+  elif ! echo "$hosts" | grep -qxF "$want_mx"; then
+    bad MX "points at $others, not $MAIL_HOSTNAME"
+  elif [ -n "$others" ]; then
+    bad MX "also points at $others - remove it, or mail splits between servers"
+  else
+    ok MX "$MAIL_HOSTNAME"
+  fi
+
+  # SPF: exactly one record, and it must allow the gateway's address.
+  spf=$(txt "$d" | grep -i '^v=spf1' || true)
+  n=$(echo "$spf" | grep -c . || true)
+  if [ "$n" -eq 0 ]; then
+    bad SPF "none published"
+  elif [ "$n" -gt 1 ]; then
+    bad SPF "$n SPF records - receivers treat that as an error; merge them into one"
+  elif [ "$ip_ok" != true ]; then
+    bad SPF "gateway address unknown, cannot check: $spf"
+  elif echo " $spf " | grep -Eiq "[ +]ip4:${GATE_PUBLIC_IP//./\\.}(/32)? "; then
+    ok SPF "$spf"
+  else
+    bad SPF "does not list ip4:$GATE_PUBLIC_IP: $spf"
+  fi
+
+  # DKIM: the published key must be the one OpenDKIM signs with here.
+  local_p=$(dkim_p "$dk")
+  pub_p=$(dkim_p "$(txt "$DKIM_SELECTOR._domainkey.$d")")
+  if [ -z "$local_p" ]; then
+    bad DKIM "no key on this host for $d - run setup"
+  elif [ -z "$pub_p" ]; then
+    bad DKIM "$DKIM_SELECTOR._domainkey$sfx not published"
+  elif [ "$pub_p" = "$local_p" ]; then
+    ok DKIM "$DKIM_SELECTOR._domainkey$sfx matches this host's key"
+  else
+    bad DKIM "$DKIM_SELECTOR._domainkey$sfx differs from this host's key (pasted wrong, or the key was rebuilt)"
+  fi
+
+  # DMARC: exactly one record.
+  dm=$(txt "_dmarc.$d" | grep -i '^v=DMARC1' || true)
+  n=$(echo "$dm" | grep -c . || true)
+  if [ "$n" -eq 0 ]; then
+    bad DMARC "_dmarc$sfx not published"
+  elif [ "$n" -gt 1 ]; then
+    bad DMARC "$n DMARC records - keep one"
+  else
+    ok DMARC "$dm"
+  fi
 done
+
+# The mail host itself: an A record at the gateway, never a CNAME.
+echo
+echo "===================================================================="
+echo "$MAIL_HOSTNAME    (the MX target)"
+echo "===================================================================="
+cname=$(dig +short CNAME "$MAIL_HOSTNAME" @1.1.1.1 2>/dev/null || true)
+addrs=$(dig +short A "$MAIL_HOSTNAME" @1.1.1.1 2>/dev/null | grep -E '^[0-9.]+$' | sort -u | tr '\n' ' ' | sed 's/ $//' || true)
+if [ -n "$cname" ]; then
+  bad A "is a CNAME to $cname - make it an A record for ${GATE_PUBLIC_IP}"
+elif [ -z "$addrs" ]; then
+  bad A "no A record"
+elif [ "$ip_ok" != true ]; then
+  bad A "$addrs (gateway address unknown, cannot check)"
+elif [ "$addrs" = "$GATE_PUBLIC_IP" ]; then
+  ok A "$addrs"
+else
+  bad A "$addrs, expected only $GATE_PUBLIC_IP"
+fi
 
 echo
 echo "Notes:"
 echo "  - An apex domain's Mail Settings must be 'Custom MX' for MX rows to be allowed."
 echo "  - Use ~all while testing; change to -all once mail flows cleanly."
-echo "  - $MAIL_HOSTNAME must be an A record ($GATE_PUBLIC_IP), never a CNAME:"
-echo "    now: $(pub A "$MAIL_HOSTNAME")   (CNAME: $(pub CNAME "$MAIL_HOSTNAME" || true))"
+echo "  - The gateway's own records (its HELO name's SPF, reverse DNS) are checked by"
+echo "    'mailgate test' on the gateway."
+echo "  - A change can take up to its TTL to show here; 1.1.1.1 also caches 'not found'."
+echo
+if [ "$FAILS" -eq 0 ]; then
+  echo "RESULT: PASS - DNS is correct for: $MAIL_DOMAINS"
+else
+  echo "RESULT: $FAILS problem(s) - fix the FAIL lines, using the rows printed above."
+fi

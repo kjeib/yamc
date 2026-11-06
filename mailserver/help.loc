@@ -11,7 +11,7 @@ module (kjeib.com), linked by the WireGuard network named in mail.conf
 USAGE
   yamc -h uranus mailserver [-e yes=1]     report, then converge (idempotent)
   yamc -h uranus mailserver status         services, queue, cert expiry, DKIM, accounts
-  yamc -h uranus mailserver dns            DNS rows to publish, and what DNS has now
+  yamc -h uranus mailserver dns            DNS rows to publish, and checks them (PASS/FAIL)
   yamc -h uranus mailserver user [NAME]    list accounts / set NAME's password
   yamc -h uranus -e delete=1 mailserver user NAME
   yamc -h uranus mailserver cert           pull the TLS cert now (the timer does it anyway)
