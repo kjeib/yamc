@@ -1,0 +1,7 @@
+#!/bin/bash
+# wg-hub/setup.post.loc - after a successful 'wg-hub' run, record the hub's
+# public key in yamc.local/wgnet/<net>.conf (yamc runs this locally, after the
+# remote setup). Same logic as 'wg-hub key -e save=1', in its lenient mode.
+auto=1
+# shellcheck disable=SC1091
+source "$MOD_DIR/key.loc"

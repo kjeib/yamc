@@ -22,7 +22,9 @@ SUBCOMMANDS
       yamc -h HUB -e net=bkup wg-hub status
 
   key                    Show the hub's public key; -e save=1 records it in
-                         <net>.conf. Peers cannot be configured without it.
+                         <net>.conf. Every successful setup run already
+                         records it (if none is recorded); this is the manual
+                         form, and -e force=1 replaces a different key.
       yamc -h HUB -e net=bkup wg-hub key
       yamc -h HUB -e net=bkup -e save=1 wg-hub key
 
@@ -35,7 +37,7 @@ CONFIGURATION  (yamc.local/wgnet/<net>.conf and <net>.peers)
   WG_PORT       listen port
   WG_SUBNET     e.g. 10.9.9.0/24
   WG_HUB_ADDR   this hub's tunnel address
-  WG_HUB_PUBKEY printed on bootstrap; paste it in, peers need it
+  WG_HUB_PUBKEY recorded by the first successful run; peers need it
   WG_ENDPOINT   what peers dial (used by wg-peer)
   LAN_POLICY    none | route:<host> | full     REQUIRED, no default
   WG_HUB_PORTS  optional: "tcp:10025 udp:53" | none | (unset = any port)

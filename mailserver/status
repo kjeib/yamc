@@ -1,0 +1,74 @@
+#!/bin/bash
+# mailserver/status - services, listeners, queue, certificate, DKIM, accounts
+#
+# Usage: yamc -h uranus mailserver status
+# Read-only.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+ms_banner status
+ms_need_root
+
+[ -f "$MS_CONF" ] || ms_die "$MS_CONF not found - has 'mailserver' setup run here?"
+# shellcheck disable=SC1090
+. "$MS_CONF"
+
+echo
+echo "Services:"
+for u in postfix cyrus-imapd spamd spamass-milter opendkim mailserver-certpull.timer; do
+  printf '  %-28s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null)"
+done
+r=$(systemctl show -p Result --value mailserver-certpull.service 2>/dev/null)
+printf '  %-28s last result: %s\n' "mailserver-certpull" "${r:-never run}"
+
+echo
+echo "Listeners:"
+ss -ltnH 2>/dev/null | awk '{print $4}' \
+  | grep -E ':(25|587|993|10025|10587|10993|8891)$' | sort -u | sed 's/^/  /'
+
+echo
+echo "Tunnel to gateway ($GATE_TUNNEL_ADDR):"
+if timeout 4 bash -c "</dev/tcp/$GATE_TUNNEL_ADDR/25" 2>/dev/null; then
+  echo "  gateway Postfix reachable - outbound mail can leave"
+else
+  echo "  gateway Postfix NOT reachable - outbound mail queues here"
+fi
+
+echo
+echo "Queue:"
+n=$(postqueue -j 2>/dev/null | grep -c . || true)
+echo "  $n message(s) queued"
+[ "$n" -gt 0 ] && postqueue -p 2>/dev/null | tail -n 12 | sed 's/^/  /'
+
+echo
+echo "Certificate ($MS_TLS/fullchain.pem):"
+if [ -f "$MS_STATE_DIR/cert.state" ]; then
+  sed 's/^/  /' "$MS_STATE_DIR/cert.state"
+fi
+d=$(ms_cert_days "$MS_TLS/fullchain.pem" || true)
+[ -n "$d" ] && echo "  now: $d days left"
+[ -n "$d" ] && [ "$d" -lt 21 ] && echo "  *** WARNING: renewal on the gateway appears to be failing ***"
+
+echo
+echo "DKIM (selector $DKIM_SELECTOR):"
+for dom in $MAIL_DOMAINS; do
+  if [ -f "/etc/opendkim/keys/$dom/$DKIM_SELECTOR.private" ]; then
+    pub=$(dig +short TXT "$DKIM_SELECTOR._domainkey.$dom" @1.1.1.1 2>/dev/null | tr -d '" \n')
+    if [ -z "$pub" ]; then st="key present, NOT published in DNS"
+    elif grep -q "${pub##*p=}" <(tr -d '" \n\t()' < "/etc/opendkim/keys/$dom/$DKIM_SELECTOR.txt"); then st="key present, published, matches"
+    else st="key present, DNS has a DIFFERENT key"; fi
+  else
+    st="NO KEY - run setup"
+  fi
+  printf '  %-28s %s\n' "$dom" "$st"
+done
+
+echo
+echo "Mail accounts (sasldb):"
+sasldblistusers2 2>/dev/null | sed 's/^/  /' || echo "  (none yet)"
+
+echo
+echo "Recent errors (postfix, cyrus):"
+journalctl -u postfix@- -u cyrus-imapd --since "-1 day" -p warning --no-pager -q 2>/dev/null \
+  | tail -n 10 | sed 's/^/  /' || true
+exit 0

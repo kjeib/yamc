@@ -1,0 +1,21 @@
+#!/bin/bash
+# mailserver/setup.loc - resolve and validate the site mail config locally
+#
+# Usage: yamc -h uranus mailserver [-e yes=1]
+#
+# yamc.local lives only on this machine, so validation happens here and the
+# remote script receives resolved values plus a staged alias table.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/mailconf.loc.sh"
+
+mc_load_store || exit 1
+mc_aliases "$MOD_TMP/virtual" || exit 1
+# shellcheck disable=SC2086
+mc_export $MC_STORE_VARS MC_MAILBOXES
+
+echo ""
+echo "  public name : $MAIL_HOSTNAME"
+echo "  domains     : $MAIL_DOMAINS"
+echo "  tunnel      : $WG_IFACE  hub $WG_HUB_ADDR  gateway $GATE_TUNNEL_ADDR"
+echo ""

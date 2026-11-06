@@ -1,0 +1,390 @@
+#!/bin/bash
+# mailgate/setup - converge this host into the site's public mail gateway
+#
+# Usage: yamc -h kjeib.com mailgate [-e yes=1]
+#
+# The gateway holds the static public IP and nothing else of value:
+#   HAProxy   public :25 / :587 / :993 -> mail store over WireGuard
+#             (SMTP with the PROXY protocol, so the store sees real clients)
+#   Postfix   OUTBOUND ONLY: listens on the tunnel address, accepts only from
+#             the mail store, delivers to the internet (or via a relay)
+#   certbot   the mail TLS certificate (standalone, port 80)
+#   certpush  forced-command SSH key so the store can fetch that certificate
+#   nftables  default-deny firewall: 22, 25, 80, 587, 993
+#
+# No mail is stored here and no passwords. Idempotent: files are compared
+# before writing; services restart only when their config changed.
+#
+# Design: yamc.local/mailserver/README.md.  Companion: mailserver (on uranus).
+
+set -e
+export DEBIAN_FRONTEND=noninteractive
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+
+mg_banner setup
+mg_need_root
+
+PKGS="haproxy postfix certbot nftables bind9-dnsutils"
+# shellcheck disable=SC2086
+MISSING=$(mg_pkgs_missing $PKGS)
+
+CERT_NAME="$MAIL_HOSTNAME"
+LIVE="/etc/letsencrypt/live/$CERT_NAME"
+HUB="$WG_HUB_ADDR"
+PUB="$GATE_PUBLIC_IP"
+
+# ---------------------------------------------------------------------------
+# Preflight - facts that decide whether this can work at all
+# ---------------------------------------------------------------------------
+PROBLEMS=""
+problem() { PROBLEMS="$PROBLEMS
+    - $*"; }
+
+ip -4 -o addr show | grep -qw "inet $PUB" \
+  || problem "this host does not have $PUB (GATE_PUBLIC_IP) - wrong host or wrong config?"
+
+TUNNEL_UP=false
+ip -4 addr show dev "$WG_IFACE" 2>/dev/null | grep -q "inet $GATE_TUNNEL_ADDR/" && TUNNEL_UP=true
+
+# Ports must be free, or held by what this module itself runs.
+for p in 80 25 587 993; do
+  for owner in $(mg_port_owners "$p"); do
+    case "$p:$owner" in
+      25:haproxy|25:master|587:haproxy|993:haproxy) ;;
+      *) problem "port $p is held by '$owner' (e.g. Traefik/nginx) - retire it first" ;;
+    esac
+  done
+done
+
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+  problem "ufw is active; its rules would also apply. Disable it (this module owns the firewall): ufw disable"
+fi
+
+# Every certificate name must already point here, or HTTP validation fails.
+for n in $CERT_NAMES; do
+  a=$(getent ahostsv4 "$n" 2>/dev/null | awk 'NR==1{print $1}')
+  [ "$a" = "$PUB" ] || problem "$n resolves to '${a:-nothing}', not $PUB - fix DNS before issuing the certificate"
+done
+
+# Does the certificate need (re)issuing?
+CERT_ACTION=""
+if [ ! -f "$LIVE/cert.pem" ]; then
+  CERT_ACTION="issue"
+else
+  have=$(openssl x509 -noout -ext subjectAltName -in "$LIVE/cert.pem" 2>/dev/null \
+           | tail -n +2 | tr ',' '\n' | sed 's/^ *DNS://' | sort | xargs)
+  want=$(echo "$CERT_NAMES" | tr ' ' '\n' | sort | xargs)
+  [ "$have" = "$want" ] || CERT_ACTION="expand ($have -> $want)"
+fi
+
+# ---------------------------------------------------------------------------
+# Report the plan
+# ---------------------------------------------------------------------------
+echo
+echo "PLAN:"
+[ -n "$MISSING" ] && echo "    install: $MISSING" || echo "    packages: all present"
+echo "    firewall (nftables, default deny): allow 22, 25, 80, 587, 993; ICMP"
+echo "    HAProxy  $PUB:25  -> $HUB:10025  (PROXY v2)"
+echo "             $PUB:587 -> $HUB:10587  (PROXY v2)"
+echo "             $PUB:993 -> $HUB:10993  (max $IMAP_CONN_PER_MIN new connections/min per IP)"
+echo "    Postfix  outbound only, on $GATE_TUNNEL_ADDR:25, accepts only from $HUB"
+case "$OUTBOUND" in
+  direct) echo "             delivers DIRECT as $GATE_HELO${RELAY_DOMAINS:+, except via $RELAY_HOST: $RELAY_DOMAINS}" ;;
+  relay)  echo "             delivers via relay $RELAY_HOST" ;;
+esac
+echo "    certificate $CERT_NAME: ${CERT_ACTION:-present, names match}"
+if [ -s "$MOD_TMP/certpull.pub" ]; then
+  echo "    cert-pull key: install for $HUB (forced command, tar of cert + key only)"
+else
+  echo "    cert-pull key: NOT STAGED - skipped (see setup.loc output)"
+fi
+[ "$TUNNEL_UP" = true ] || echo "
+  NOTE: $WG_IFACE is not up with $GATE_TUNNEL_ADDR. Configured anyway; mail
+  flows once 'wg-peer' has run here and the hub lists this peer."
+
+if [ -n "$PROBLEMS" ]; then
+  echo
+  echo "CANNOT PROCEED:$PROBLEMS"
+  exit 1
+fi
+
+mg_gate "configure the mail gateway"
+
+CHANGED_PF=false CHANGED_HA=false
+
+# ---------------------------------------------------------------------------
+# Packages
+# ---------------------------------------------------------------------------
+if [ -n "$MISSING" ]; then
+  echo
+  echo "Installing packages..."
+  echo "postfix postfix/main_mailer_type select No configuration" | debconf-set-selections
+  echo "postfix postfix/mailname string $GATE_HELO" | debconf-set-selections
+  mg_run apt-get update -qq
+  # shellcheck disable=SC2086
+  mg_run apt-get install -y -q $MISSING
+fi
+
+# Postfix binds the tunnel address, which may not exist yet at boot.
+mg_put /etc/sysctl.d/60-mailgate.conf 644 <<<"net.ipv4.ip_nonlocal_bind = 1" \
+  && mg_run sysctl -q -w net.ipv4.ip_nonlocal_bind=1 || true
+
+# ---------------------------------------------------------------------------
+# Firewall - own table, own unit; never touches other tables.
+# Applied atomically: the delete/create is one nft transaction, and
+# 'established' keeps the SSH session this runs over.
+# ---------------------------------------------------------------------------
+echo
+echo "Firewall..."
+mkdir -p "$MG_ETC"
+FW_CHANGED=false
+mg_put "$MG_NFT" 644 <<EOF && FW_CHANGED=true || true
+#!/usr/sbin/nft -f
+# Managed by yamc: mailgate. Default-deny inbound for the mail gateway.
+table inet mailgate
+delete table inet mailgate
+
+table inet mailgate {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iif "lo" accept
+    ct state established,related accept
+    ct state invalid drop
+    meta l4proto { icmp, ipv6-icmp } accept
+    tcp dport 22 accept comment "ssh"
+    tcp dport { 25, 587, 993 } accept comment "mail -> HAProxy; tunnel Postfix is bound to $GATE_TUNNEL_ADDR only"
+    tcp dport 80 accept comment "certbot standalone"
+  }
+}
+EOF
+mg_put /etc/systemd/system/mailgate-firewall.service 644 <<EOF && FW_CHANGED=true || true
+# Managed by yamc: mailgate
+[Unit]
+Description=Mail gateway firewall (yamc mailgate)
+After=nftables.service
+Before=network-online.target haproxy.service postfix.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f $MG_NFT
+ExecStop=/usr/sbin/nft delete table inet mailgate
+
+[Install]
+WantedBy=multi-user.target
+EOF
+[ "$FW_CHANGED" = true ] && mg_run systemctl daemon-reload
+systemctl is-enabled --quiet mailgate-firewall 2>/dev/null || mg_run systemctl enable mailgate-firewall
+if [ "$FW_CHANGED" = true ] || ! nft list table inet mailgate >/dev/null 2>&1; then
+  mg_run nft -f "$MG_NFT"
+  systemctl is-active --quiet mailgate-firewall || mg_run systemctl start mailgate-firewall
+else
+  echo "    unchanged"
+fi
+
+# ---------------------------------------------------------------------------
+# Postfix - outbound only
+# ---------------------------------------------------------------------------
+echo
+echo "Postfix (outbound)..."
+[ -f /etc/postfix/main.cf ] || cp /usr/share/postfix/main.cf.debian /etc/postfix/main.cf
+PF_BEFORE=$( { postconf -n; postconf -M; } 2>/dev/null | sort )
+
+PF_MAIN=(
+  "compatibility_level=3.6"
+  "myhostname=$GATE_HELO"
+  "myorigin=\$myhostname"
+  "mydestination=localhost"
+  "inet_interfaces=127.0.0.1, $GATE_TUNNEL_ADDR"
+  "inet_protocols=ipv4"
+  "mynetworks=127.0.0.0/8 $HUB/32"
+  "relay_domains="
+  "smtpd_relay_restrictions=permit_mynetworks, reject"
+  "smtpd_recipient_restrictions=permit_mynetworks, reject"
+  "smtpd_banner=\$myhostname ESMTP"
+  "smtp_helo_name=\$myhostname"
+  "smtp_tls_security_level=may"
+  "smtp_tls_loglevel=1"
+  "message_size_limit=$MESSAGE_SIZE_LIMIT"
+  "alias_maps=hash:/etc/aliases"
+  "alias_database=hash:/etc/aliases"
+  "biff=no"
+  "append_dot_mydomain=no"
+  "disable_vrfy_command=yes"
+)
+if [ "$OUTBOUND" = relay ]; then
+  PF_MAIN+=("relayhost=$RELAY_HOST")
+else
+  PF_MAIN+=("relayhost=")
+fi
+if [ -n "$RELAY_DOMAINS" ]; then
+  for d in $RELAY_DOMAINS; do echo "$d smtp:$RELAY_HOST"; done \
+    | mg_put /etc/postfix/transport 644 && { mg_run postmap /etc/postfix/transport; CHANGED_PF=true; } || true
+  [ -f /etc/postfix/transport.db ] || mg_run postmap /etc/postfix/transport
+  PF_MAIN+=("transport_maps=hash:/etc/postfix/transport")
+else
+  PF_MAIN+=("transport_maps=")
+fi
+if [ -n "$RELAY_HOST" ]; then
+  [ -s "$MOD_TMP/sasl_passwd" ] || mg_die "relay credentials were not staged"
+  if mg_put /etc/postfix/sasl_passwd 600 < "$MOD_TMP/sasl_passwd" || [ ! -f /etc/postfix/sasl_passwd.db ]; then
+    mg_run postmap /etc/postfix/sasl_passwd; chmod 600 /etc/postfix/sasl_passwd.db; CHANGED_PF=true
+  fi
+  PF_MAIN+=("smtp_sasl_auth_enable=yes" "smtp_sasl_password_maps=hash:/etc/postfix/sasl_passwd"
+            "smtp_sasl_security_options=noanonymous" "smtp_sasl_tls_security_options=noanonymous")
+else
+  PF_MAIN+=("smtp_sasl_auth_enable=no" "smtp_sasl_password_maps=")
+fi
+postconf -e "${PF_MAIN[@]}"
+[ -f /etc/aliases.db ] || mg_run newaliases
+
+PF_AFTER=$( { postconf -n; postconf -M; } 2>/dev/null | sort )
+[ "$PF_BEFORE" = "$PF_AFTER" ] || { CHANGED_PF=true; echo "    main.cf updated"; }
+mg_run postfix check
+
+# ---------------------------------------------------------------------------
+# HAProxy - validated before it is installed
+# ---------------------------------------------------------------------------
+echo
+echo "HAProxy..."
+HA_TMP=$(mktemp)
+cat > "$HA_TMP" <<EOF
+# Managed by yamc: mailgate - edits are overwritten.
+# Public mail ports -> the mail store ($HUB) over WireGuard ($WG_IFACE).
+# No health checks: a check against a PROXY-protocol Postfix logs a lost
+# connection every interval. When the store is unreachable the connect fails
+# and the client sees a closed connection - senders queue and retry.
+
+global
+    log /dev/log local0
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    mode tcp
+    log global
+    option tcplog
+    timeout connect 10s
+    timeout client  5m
+    timeout server  5m
+
+frontend smtp
+    bind $PUB:25
+    default_backend store_smtp
+backend store_smtp
+    server store $HUB:10025 send-proxy-v2
+
+frontend submission
+    bind $PUB:587
+    default_backend store_submission
+backend store_submission
+    server store $HUB:10587 send-proxy-v2
+
+# The store's IMAP server cannot read the PROXY protocol and sees every
+# client as $GATE_TUNNEL_ADDR, so password-guessing limits live here, where
+# the real address is known.
+frontend imaps
+    bind $PUB:993
+    stick-table type ip size 10k expire 10m store conn_rate(60s)
+    tcp-request connection track-sc0 src
+    tcp-request connection reject if { sc0_conn_rate gt $IMAP_CONN_PER_MIN }
+    default_backend store_imaps
+backend store_imaps
+    server store $HUB:10993
+EOF
+haproxy -c -q -f "$HA_TMP" || { rm -f "$HA_TMP"; mg_die "generated HAProxy config is invalid"; }
+mg_put /etc/haproxy/haproxy.cfg 644 < "$HA_TMP" && CHANGED_HA=true || true
+rm -f "$HA_TMP"
+
+# ---------------------------------------------------------------------------
+# Certificate
+# ---------------------------------------------------------------------------
+echo
+echo "Certificate..."
+CERT_FAILED=false
+if [ -n "$CERT_ACTION" ]; then
+  args=(certonly --standalone --non-interactive --agree-tos --keep-until-expiring
+        --expand --cert-name "$CERT_NAME")
+  if [ -n "${CERT_EMAIL:-}" ]; then args+=(-m "$CERT_EMAIL"); else args+=(--register-unsafely-without-email); fi
+  for n in $CERT_NAMES; do args+=(-d "$n"); done
+  mg_run certbot "${args[@]}" || CERT_FAILED=true
+else
+  echo "    $CERT_NAME present, $(mg_cert_days "$LIVE/cert.pem") days left (certbot.timer renews)"
+fi
+systemctl is-enabled --quiet certbot.timer 2>/dev/null || mg_run systemctl enable --now certbot.timer
+
+# ---------------------------------------------------------------------------
+# Certificate push: forced command for the store's pull key
+# ---------------------------------------------------------------------------
+echo
+echo "Certificate pull access..."
+mg_put "$MG_CERTPUSH" 755 <<EOF || true
+#!/bin/sh
+# Managed by yamc: mailgate. The ONLY thing the mail store's key may run:
+# emit the mail certificate and key as a tar stream (symlinks dereferenced).
+exec tar -C "$LIVE" -chf - fullchain.pem privkey.pem
+EOF
+if [ -s "$MOD_TMP/certpull.pub" ]; then
+  KEYLINE="from=\"$HUB\",restrict,command=\"$MG_CERTPUSH\" $(head -n1 "$MOD_TMP/certpull.pub")"
+  install -d -m 700 /root/.ssh
+  touch "$MG_AUTH_KEYS"
+  { grep -vF "command=\"$MG_CERTPUSH\"" "$MG_AUTH_KEYS" || true; echo "$KEYLINE"; } \
+    | mg_put "$MG_AUTH_KEYS" 600 || echo "    unchanged"
+else
+  echo "    no key staged - skipped"
+fi
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+echo
+echo "Services..."
+svc_apply() {   # svc_apply UNIT CHANGED [reload|restart]
+  local unit="$1" changed="$2" how="${3:-restart}"
+  systemctl is-enabled --quiet "$unit" 2>/dev/null || mg_run systemctl enable "$unit"
+  if ! systemctl is-active --quiet "$unit"; then
+    mg_run systemctl start "$unit"
+  elif [ "$changed" = true ]; then
+    mg_run systemctl "$how" "$unit"
+  else
+    echo "    $unit: unchanged"
+  fi
+}
+# Postfix restart, not reload: inet_interfaces changes need it.
+svc_apply postfix "$CHANGED_PF" restart
+svc_apply haproxy "$CHANGED_HA" reload
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+sleep 1
+echo
+echo "===================================================================="
+echo "Listening:"
+ss -ltnH 2>/dev/null | awk '{print $4}' | grep -E ':(25|80|587|993)$' | sort -u | sed 's/^/    /'
+for u in haproxy postfix mailgate-firewall certbot.timer; do
+  printf '    %-20s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null)"
+done
+[ -f "$LIVE/cert.pem" ] && echo "    certificate: $(mg_cert_days "$LIVE/cert.pem") days left"
+echo "===================================================================="
+
+if [ "$CERT_FAILED" = true ]; then
+  echo
+  echo "CERTIFICATE NOT ISSUED. Everything else is configured. Check that every"
+  echo "name in CERT_NAMES points at $PUB and that port 80 is reachable, then re-run."
+  exit 1
+fi
+echo
+if [ -s "$MOD_TMP/certpull.pub" ]; then
+  echo "The mail store picks the certificate up by itself within the hour"
+  echo "(or now:  yamc -h <store> mailserver cert)."
+else
+  echo "STILL TO DO: no cert-pull key from the store yet. Run 'mailserver' on the"
+  echo "store (it records the key), then re-run this."
+fi
+echo "Checks:  yamc -h $(hostname) mailgate status | test"

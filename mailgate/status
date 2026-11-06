@@ -1,0 +1,74 @@
+#!/bin/bash
+# mailgate/status - services, firewall, tunnel, certificate, outbound queue
+#
+# Usage: yamc -h kjeib.com mailgate status
+# Read-only.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+mg_banner status
+mg_need_root
+
+LIVE="/etc/letsencrypt/live/$MAIL_HOSTNAME"
+
+echo
+echo "Services:"
+for u in haproxy postfix mailgate-firewall certbot.timer; do
+  printf '  %-20s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null)"
+done
+
+echo
+echo "Listeners:"
+ss -ltnpH 2>/dev/null | awk '{print $4, $6}' | grep -E ':(25|80|587|993) ' \
+  | sed 's/users:(("\([^"]*\)".*/\1/' | sort -u | sed 's/^/  /'
+
+echo
+echo "Firewall:"
+if nft list table inet mailgate >/dev/null 2>&1; then
+  echo "  table inet mailgate loaded (default deny; 22 25 80 587 993 open)"
+else
+  echo "  *** table inet mailgate NOT loaded - host is unprotected ***"
+fi
+
+echo
+echo "Tunnel ($WG_IFACE):"
+if ip link show "$WG_IFACE" >/dev/null 2>&1; then
+  last=$(wg show "$WG_IFACE" latest-handshakes 2>/dev/null | awk '{print $2}' | sort -n | tail -n1)
+  if [ -n "$last" ] && [ "$last" != 0 ]; then
+    echo "  last handshake $(( $(date +%s) - last ))s ago"
+  else
+    echo "  no handshake yet"
+  fi
+  for p in 10025 10587 10993; do
+    if timeout 4 bash -c "</dev/tcp/$WG_HUB_ADDR/$p" 2>/dev/null; then r=open; else r="NOT reachable"; fi
+    printf '  store %s:%-6s %s\n' "$WG_HUB_ADDR" "$p" "$r"
+  done
+else
+  echo "  $WG_IFACE does not exist - run wg-peer"
+fi
+
+echo
+echo "Certificate ($MAIL_HOSTNAME):"
+if [ -f "$LIVE/cert.pem" ]; then
+  echo "  names:   $(openssl x509 -noout -ext subjectAltName -in "$LIVE/cert.pem" | tail -n +2 | tr -d ' ')"
+  echo "  expires: $(openssl x509 -noout -enddate -in "$LIVE/cert.pem" | cut -d= -f2) ($(mg_cert_days "$LIVE/cert.pem") days)"
+else
+  echo "  not issued"
+fi
+if grep -q 'mailgate-certpush' "$MG_AUTH_KEYS" 2>/dev/null; then
+  echo "  store pull key: installed"
+else
+  echo "  store pull key: NOT installed"
+fi
+
+echo
+echo "Outbound queue:"
+n=$(postqueue -j 2>/dev/null | grep -c . || true)
+echo "  $n message(s) queued"
+[ "$n" -gt 0 ] && postqueue -p 2>/dev/null | tail -n 12 | sed 's/^/  /'
+
+echo
+echo "Recent outbound problems (24h):"
+journalctl -u postfix@- --since "-1 day" --no-pager -q 2>/dev/null \
+  | grep -E 'status=(bounced|deferred)' | tail -n 10 | sed 's/^/  /' || true
+exit 0

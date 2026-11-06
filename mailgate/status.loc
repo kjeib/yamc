@@ -1,0 +1,8 @@
+#!/bin/bash
+# mailgate/status.loc - resolve the shared mail config for 'status'
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/mailconf.loc.sh"
+mc_load_gate >/dev/null || { mc_load_gate; exit 1; }
+# shellcheck disable=SC2086
+mc_export $MC_GATE_VARS

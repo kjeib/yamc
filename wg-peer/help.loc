@@ -31,19 +31,20 @@ SUBCOMMANDS
       yamc -h BOX -e net=bkup -e save=1 wg-peer key
 
   -e net=NAME  REQUIRED, no default.
-  -e addr=ADDR REQUIRED, no default. Without it the module lists the addresses
-               already in use and stops - auto-picking risks a collision, and
-               WireGuard does not error on overlapping AllowedIPs, it silently
-               reassigns and misroutes the loser.
+  -e addr=ADDR REQUIRED the first time, no default. Without it (and without a
+               line for this host in <net>.peers) the module lists the
+               addresses in use and stops - auto-picking risks a collision,
+               and WireGuard does not error on overlapping AllowedIPs, it
+               silently reassigns and misroutes the loser. Later runs read it
+               from this host's line in <net>.peers.
 
 KEYS
 
   The private key is generated ON THIS MACHINE and never leaves it - not to
-  yamc, not into yamc.local. Only the public key comes back, printed as a
-  ready-to-paste line for yamc.local/wgnet/<net>.peers.
-
-  That paste is manual by design: yamc modules do not write to yamc.local
-  (AGENTS.md).
+  yamc, not into yamc.local. Only the public key comes back: a successful
+  setup run appends this host's line to yamc.local/wgnet/<net>.peers
+  (never replacing a different one). Then deploy the table to the hub:
+      yamc -h HUB -e net=NAME -e yes=1 wg-hub
 
 THE TWO /32s
 

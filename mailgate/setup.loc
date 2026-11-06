@@ -1,0 +1,43 @@
+#!/bin/bash
+# mailgate/setup.loc - resolve the gateway config and stage what the gateway
+# needs: the store's certificate-pull key and, if relaying, the relay login.
+#
+# Usage: yamc -h kjeib.com mailgate [-e yes=1]
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/mailconf.loc.sh"
+
+mc_load_gate || exit 1
+# shellcheck disable=SC2086
+mc_export $MC_GATE_VARS
+
+# The store's certificate-pull key, recorded by every 'mailserver' run.
+if [ -n "$MS_DIR" ] && [ -s "$MS_DIR/certpull.pub" ]; then
+  cp "$MS_DIR/certpull.pub" "$MOD_TMP/certpull.pub"
+  echo "Cert-pull key: staged from $MS_DIR/certpull.pub"
+else
+  echo "Cert-pull key: none yet - the store cannot fetch the certificate until"
+  echo "               'mailserver' has run once (it records the key), then re-run this."
+fi
+
+# Relay credentials, only when a relay is in use. Kept out of mailgate.conf
+# so it can be committed; relay.secret must not be.
+if [ -n "${RELAY_HOST:-}" ]; then
+  SECRET="$MG_DIR/relay.secret"
+  [ -f "$SECRET" ] || { echo "ERROR: RELAY_HOST is set but $SECRET does not exist"
+                        echo "       It needs:  RELAY_USER=\"...\"  RELAY_PASS=\"...\""; exit 1; }
+  RELAY_USER=$(  . "$SECRET"; echo "${RELAY_USER:-}")
+  RELAY_PASS=$(  . "$SECRET"; echo "${RELAY_PASS:-}")
+  [ -n "$RELAY_USER" ] && [ -n "$RELAY_PASS" ] || { echo "ERROR: $SECRET lacks RELAY_USER or RELAY_PASS"; exit 1; }
+  if git -C "$MG_DIR" ls-files --error-unmatch relay.secret >/dev/null 2>&1; then
+    echo "WARNING: relay.secret is tracked by git in $(git -C "$MG_DIR" rev-parse --show-toplevel)"
+  fi
+  ( umask 077; printf '%s %s:%s\n' "$RELAY_HOST" "$RELAY_USER" "$RELAY_PASS" > "$MOD_TMP/sasl_passwd" )
+  echo "Relay login: staged for $RELAY_HOST"
+fi
+
+echo ""
+echo "  public     : $GATE_PUBLIC_IP  ($MAIL_HOSTNAME, sends as $GATE_HELO)"
+echo "  tunnel     : $WG_IFACE  gateway $GATE_TUNNEL_ADDR -> mail store $WG_HUB_ADDR"
+echo "  outbound   : $OUTBOUND${RELAY_DOMAINS:+  (via relay: $RELAY_DOMAINS)}"
+echo ""

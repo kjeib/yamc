@@ -1,0 +1,8 @@
+#!/bin/bash
+# mailserver/setup.post.loc - after a successful 'mailserver' run, record the
+# certificate-pull public key in yamc.local/mailserver/certpull.pub, where
+# mailgate picks it up (yamc runs this locally, after the remote setup).
+# Same logic as 'mailserver key -e save=1', in its lenient mode.
+auto=1
+# shellcheck disable=SC1091
+source "$MOD_DIR/key.loc"

@@ -1,0 +1,62 @@
+#!/bin/bash
+# mailserver/key - show, and optionally record, the certificate-pull public key
+#
+# Usage:
+#   yamc -h uranus mailserver key              # print it
+#   yamc -h uranus -e save=1 mailserver key    # write yamc.local/mailserver/certpull.pub
+#
+# LOCAL-ONLY subfunction (same pattern as wg-hub key): yamc.local exists only
+# on this machine. mailgate reads certpull.pub and installs it on the gateway
+# with a forced command, so uranus can fetch the certificate and nothing else.
+# Writing to yamc.local happens ONLY with -e save=1 - or with auto=1, which
+# setup.post.loc sets after every successful 'mailserver' run. auto=1 records
+# a missing key but never replaces a DIFFERENT one (that only warns), and is
+# silent when there is nothing to record.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/mailconf.loc.sh"
+mc_load_store >/dev/null || { mc_load_store; exit 1; }
+
+DEST="$MS_DIR/certpull.pub"
+[ "${auto:-0}" = "1" ] && save=1
+PUB=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_user@$tgt_host" \
+        "cat /etc/mailserver/certpull.pub" 2>/dev/null)
+
+if [ -z "$PUB" ] && [ "${auto:-0}" = "1" ]; then
+  exit 0      # report-only run, or setup stopped early: nothing to record
+fi
+if ! [[ "$PUB" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ .*)?$ ]]; then
+  echo "ERROR: no valid key at /etc/mailserver/certpull.pub on $tgt_host"
+  echo "       Has setup run there?  yamc -h $tgt_host mailserver"
+  exit 1
+fi
+
+if [ "${auto:-0}" != "1" ]; then
+  echo ""
+  echo "Certificate-pull key ($tgt_host):"
+  echo "  $PUB"
+fi
+
+if [ "${save:-0}" != "1" ]; then
+  echo ""
+  echo "To record it:  yamc -h $tgt_host -e save=1 mailserver key"
+  exit 0
+fi
+
+if [ -f "$DEST" ] && [ "$(cat "$DEST")" = "$PUB" ]; then
+  echo ""; echo "$DEST already holds the cert-pull key."; exit 0
+fi
+if [ -f "$DEST" ] && [ "${force:-0}" != "1" ]; then
+  echo ""
+  [ "${auto:-0}" = "1" ] && echo -n "WARNING (not changed): " || echo -n "ERROR: "
+  echo "$DEST holds a DIFFERENT key."
+  echo "       If $tgt_host's key was regenerated:"
+  echo "         yamc -h $tgt_host -e save=1 -e force=1 mailserver key"
+  echo "       then re-run mailgate on the gateway."
+  [ "${auto:-0}" = "1" ] && exit 0
+  exit 1
+fi
+echo "$PUB" > "$DEST"
+echo ""
+echo "Recorded the cert-pull key in $DEST"
+echo "The gateway installs it on its next run:  yamc -h <gateway> mailgate"

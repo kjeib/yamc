@@ -1,0 +1,538 @@
+#!/bin/bash
+# mailserver/setup - converge this host into the site's mail store
+#
+# Usage: yamc -h uranus mailserver [-e yes=1]
+#
+# Installs and configures Postfix, Cyrus IMAP, SpamAssassin and OpenDKIM from
+# yamc.local/mailserver/. Idempotent: every file is compared before it is
+# written, and services are restarted only when their config changed. A second
+# run with no config change reports "no changes".
+#
+# Design: yamc.local/mailserver/README.md.  Companion: mailgate (on kjeib).
+
+set -e
+export DEBIAN_FRONTEND=noninteractive
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+
+ms_banner setup
+ms_need_root
+
+VIRTUAL_SRC="$MOD_TMP/virtual"
+[ -s "$VIRTUAL_SRC" ] || ms_die "no staged alias table - run through yamc so setup.loc can stage it"
+
+PKGS="postfix postfix-pcre cyrus-imapd cyrus-admin cyrus-clients sasl2-bin
+      libsasl2-modules libsasl2-modules-db spamassassin spamc spamd
+      spamass-milter opendkim opendkim-tools ssl-cert swaks"
+# shellcheck disable=SC2086
+MISSING=$(ms_pkgs_missing $PKGS)
+
+SASL_REALM="$(hostname)"
+SPAMASS_SOCK="/var/spool/postfix/spamass/spamass.sock"
+GW_MX="$WG_HUB_ADDR:10025"
+GW_SUB="$WG_HUB_ADDR:10587"
+GW_IMAPS="$WG_HUB_ADDR:10993"
+
+TUNNEL_UP=false
+ip -4 addr show dev "$WG_IFACE" 2>/dev/null | grep -q "inet $WG_HUB_ADDR/" && TUNNEL_UP=true
+
+# ---------------------------------------------------------------------------
+# Report the plan
+# ---------------------------------------------------------------------------
+echo
+echo "PLAN:"
+if [ -n "$MISSING" ]; then
+  echo "    install: $MISSING"
+else
+  echo "    packages: all present"
+fi
+echo "    public name $MAIL_HOSTNAME, domains: $MAIL_DOMAINS"
+echo "    mailboxes: $MC_MAILBOXES   (created in Cyrus on first delivery)"
+echo "    addresses: $(grep -c . "$VIRTUAL_SRC") entries in /etc/postfix/virtual"
+echo
+echo "  Listeners:"
+echo "    $GW_MX     public MX via gateway (PROXY protocol) - our domains, known recipients only"
+echo "    $GW_SUB     submission via gateway (PROXY) - TLS + login required"
+echo "    $GW_IMAPS     IMAPS via gateway"
+echo "    :25 / :587 / :993   LAN  (relay without login only from $LAN_NETWORKS)"
+echo
+echo "  Outbound: everything relays to [$GATE_TUNNEL_ADDR]:25 (Postfix on the gateway)."
+echo "  DKIM selector '$DKIM_SELECTOR'; keys are created for any domain lacking one."
+if [ -f "$MS_TLS/fullchain.pem" ]; then
+  echo "  TLS: existing $MS_TLS/fullchain.pem kept (the cert-pull timer refreshes it)"
+else
+  echo "  TLS: self-signed placeholder until the timer pulls the real one from the gateway"
+fi
+if [ "$TUNNEL_UP" != true ]; then
+  echo
+  echo "  NOTE: $WG_IFACE is not up with $WG_HUB_ADDR. The gateway listeners are"
+  echo "  configured anyway (ip_nonlocal_bind) and start answering once it is."
+  echo "  LAN mail works meanwhile; outbound mail queues until the tunnel exists."
+fi
+
+ms_gate "configure the mail server"
+
+CHANGED_PF=false CHANGED_CY=false CHANGED_DKIM=false CHANGED_SA=false CHANGED_MILTER=false
+
+# ---------------------------------------------------------------------------
+# Packages
+# ---------------------------------------------------------------------------
+if [ -n "$MISSING" ]; then
+  echo
+  echo "Installing packages..."
+  # "No configuration" stops the postfix package writing a main.cf of its own
+  # and from prompting; this script owns the configuration.
+  echo "postfix postfix/main_mailer_type select No configuration" | debconf-set-selections
+  echo "postfix postfix/mailname string $MAIL_HOSTNAME" | debconf-set-selections
+  # Finish any earlier install that stopped part way.
+  ms_run dpkg --configure -a
+  ms_run apt-get update -qq
+  # postfix first and on its own: spamass-milter's install starts the milter,
+  # whose init script chowns its socket to postfix:postfix and fails if the
+  # postfix user does not exist yet.
+  case " $MISSING " in
+    *" postfix "*) ms_run apt-get install -y -q postfix ;;
+  esac
+  # shellcheck disable=SC2086
+  ms_run apt-get install -y -q $MISSING
+fi
+
+# ---------------------------------------------------------------------------
+# Groups: postfix reads the Cyrus LMTP socket (mail), sasldb (sasl) and the
+# TLS key (ssl-cert); cyrus reads sasldb and the TLS key.
+# ---------------------------------------------------------------------------
+echo
+echo "Groups..."
+for g in mail sasl ssl-cert; do
+  id -nG postfix | grep -qw "$g" || { ms_run usermod -aG "$g" postfix; CHANGED_PF=true; }
+done
+for g in sasl ssl-cert; do
+  id -nG cyrus | grep -qw "$g" || { ms_run usermod -aG "$g" cyrus; CHANGED_CY=true; }
+done
+[ -f /etc/sasldb2 ] && { chown root:sasl /etc/sasldb2; chmod 640 /etc/sasldb2; }
+
+# Listeners on the tunnel address must be able to start before the tunnel is
+# up (boot order, or tunnel down) - otherwise Postfix and Cyrus would refuse
+# to start at all and LAN mail would die with the tunnel.
+ms_put /etc/sysctl.d/60-mailserver.conf 644 <<<"net.ipv4.ip_nonlocal_bind = 1" \
+  && ms_run sysctl -q -w net.ipv4.ip_nonlocal_bind=1 || true
+
+# ---------------------------------------------------------------------------
+# Runtime config for the installed helpers (certpull, dns, user)
+# ---------------------------------------------------------------------------
+mkdir -p "$MS_ETC" "$MS_STATE_DIR"
+ms_put "$MS_CONF" 644 <<EOF || true
+# Managed by yamc: mailserver. Source: yamc.local/mailserver/mail.conf
+# (GATE_PUBLIC_IP, OUTBOUND, RELAY_*: from yamc.local/mailgate/mailgate.conf,
+# used only by 'mailserver dns' for SPF)
+MAIL_HOSTNAME="$MAIL_HOSTNAME"
+MAIL_DOMAINS="$MAIL_DOMAINS"
+DKIM_SELECTOR="$DKIM_SELECTOR"
+GATE_PUBLIC_IP="$GATE_PUBLIC_IP"
+GATE_TUNNEL_ADDR="$GATE_TUNNEL_ADDR"
+OUTBOUND="$OUTBOUND"
+RELAY_HOST="$RELAY_HOST"
+RELAY_DOMAINS="$RELAY_DOMAINS"
+SASL_REALM="$SASL_REALM"
+EOF
+
+# ---------------------------------------------------------------------------
+# TLS - placeholder until the real certificate is pulled from the gateway
+# ---------------------------------------------------------------------------
+install -d -m 750 -o root -g ssl-cert "$MS_TLS"
+if [ ! -f "$MS_TLS/fullchain.pem" ] || [ ! -f "$MS_TLS/privkey.pem" ]; then
+  echo
+  echo "Installing a self-signed placeholder certificate..."
+  [ -f /etc/ssl/certs/ssl-cert-snakeoil.pem ] || ms_run make-ssl-cert generate-default-snakeoil
+  install -m 644 -o root -g root     /etc/ssl/certs/ssl-cert-snakeoil.pem "$MS_TLS/fullchain.pem"
+  install -m 640 -o root -g ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key "$MS_TLS/privkey.pem"
+  echo "source=self-signed placeholder" > "$MS_STATE_DIR/cert.state"
+fi
+
+# ---------------------------------------------------------------------------
+# Certificate pull: key, helper, timer
+# ---------------------------------------------------------------------------
+echo
+echo "Certificate pull..."
+if [ ! -f "$MS_CERTPULL_KEY" ]; then
+  install -d -m 700 /root/.ssh
+  ms_run ssh-keygen -q -t ed25519 -N "" -C "mailserver-certpull@$(hostname)" -f "$MS_CERTPULL_KEY"
+fi
+ms_put "$MS_ETC/certpull.pub" 644 < "$MS_CERTPULL_KEY.pub" || true
+ms_put "$MS_CERTPULL_BIN" 755 < "$MOD_DIR/certpull.sh" || true
+
+UNITS_CHANGED=false
+ms_put /etc/systemd/system/mailserver-certpull.service 644 <<EOF && UNITS_CHANGED=true || true
+# Managed by yamc: mailserver
+[Unit]
+Description=Fetch the mail TLS certificate from the gateway; install only if it changed
+After=network-online.target wg-quick@$WG_IFACE.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$MS_CERTPULL_BIN
+EOF
+ms_put /etc/systemd/system/mailserver-certpull.timer 644 <<EOF && UNITS_CHANGED=true || true
+# Managed by yamc: mailserver
+[Unit]
+Description=Mail TLS certificate pull (hourly until the first real cert, then daily)
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+[ "$UNITS_CHANGED" = true ] && ms_run systemctl daemon-reload
+systemctl is-enabled --quiet mailserver-certpull.timer 2>/dev/null \
+  || ms_run systemctl enable --now mailserver-certpull.timer
+
+# ---------------------------------------------------------------------------
+# Cyrus IMAP
+# ---------------------------------------------------------------------------
+echo
+echo "Cyrus IMAP..."
+LMTP_SOCK=$(sed -n 's/^[[:space:]]*lmtpunix[[:space:]].*listen="\([^"]*\)".*/\1/p' /etc/cyrus.conf | head -n1)
+[ -n "$LMTP_SOCK" ] || LMTP_SOCK="/run/cyrus/socket/lmtp"
+echo "    LMTP socket: $LMTP_SOCK"
+
+ms_put "$MS_ETC/default.sieve" 644 < "$MOD_DIR/default.sieve" && CHANGED_CY=true || true
+
+# Matches sun's EFFECTIVE settings (cyr_info conf-all), so migrated
+# mailboxes, folder names and client configs behave the same. Set explicitly:
+# Ubuntu's packaged imapd.conf does not use the same defaults.
+CY_FOLDERS="Drafts|Sent|Trash|Spam|Spam-maybe"
+while IFS='|' read -r key value; do
+  [ -z "$key" ] && continue
+  ms_kv_set /etc/imapd.conf "$key" "$value" && CHANGED_CY=true
+done <<EOF
+altnamespace|yes
+unixhierarchysep|yes
+virtdomains|off
+lmtp_downcase_rcpt|yes
+hashimapspool|true
+conversations|1
+specialusealways|1
+duplicatesuppression|1
+admins|cyrus
+servername|$SASL_REALM
+allowplaintext|no
+sasl_pwcheck_method|auxprop
+sasl_auxprop_plugin|sasldb
+sasl_sasldb_path|/etc/sasldb2
+sasl_mech_list|PLAIN LOGIN
+tls_server_cert|$MS_TLS/fullchain.pem
+tls_server_key|$MS_TLS/privkey.pem
+autocreate_post|1
+autocreate_inbox_folders|$CY_FOLDERS
+autocreate_subscribe_folders|$CY_FOLDERS
+autocreate_sieve_script|$MS_ETC/default.sieve
+EOF
+
+# cyrus.conf: one managed block inside SERVICES { } for the gateway listener,
+# and the unused POP3/NNTP services switched off. awk rewrite, then compare.
+CY_TMP=$(mktemp)
+awk -v gw="$GW_IMAPS" '
+  /# BEGIN yamc mailserver/ { skip = 1; next }
+  /# END yamc mailserver/   { skip = 0; next }
+  skip { next }
+  /^SERVICES[[:space:]]*\{/ {
+    print
+    print "  # BEGIN yamc mailserver - managed; edits inside this block are overwritten"
+    print "  imapsgw       cmd=\"imapd -s\" listen=\"" gw "\" prefork=0"
+    print "  # END yamc mailserver"
+    insvc = 1; next
+  }
+  insvc && /^\}/ { insvc = 0 }
+  insvc && /^[[:space:]]*(pop3|pop3s|nntp|nntps)[[:space:]]/ { print "#yamc-off# " $0; next }
+  { print }' /etc/cyrus.conf > "$CY_TMP"
+ms_put /etc/cyrus.conf 644 < "$CY_TMP" && CHANGED_CY=true || true
+rm -f "$CY_TMP"
+
+# ---------------------------------------------------------------------------
+# SpamAssassin (spamd + spamass-milter)
+# ---------------------------------------------------------------------------
+echo
+echo "SpamAssassin..."
+SA_NETS="127.0.0.1 $LAN_NETWORKS"
+ms_put /etc/spamassassin/60-mailserver.cf 644 <<EOF && CHANGED_SA=true || true
+# Managed by yamc: mailserver
+# Postfix records the REAL client address (PROXY protocol from the gateway),
+# so only the LAN is trusted - never the tunnel subnet.
+required_score   5.0
+report_safe      0
+trusted_networks $SA_NETS
+internal_networks $SA_NETS
+EOF
+
+MILTER_IGNORE=""
+for n in 127.0.0.1 $LAN_NETWORKS; do MILTER_IGNORE="$MILTER_IGNORE -i $n"; done
+ms_put /etc/default/spamass-milter 644 <<EOF && CHANGED_MILTER=true || true
+# Managed by yamc: mailserver
+#   -I  skip mail from authenticated (logged-in) senders
+#   -i  skip mail from these networks (local, LAN)
+#   -m  do not rewrite Subject/Content-Type; Sieve files on X-Spam-Flag
+#   -r  reject at SMTP time at or above this score
+OPTIONS="-u spamass-milter$MILTER_IGNORE -I -m -r $SPAM_REJECT_SCORE"
+SOCKET="$SPAMASS_SOCK"
+SOCKETOWNER="postfix:postfix"
+SOCKETMODE="0660"
+EOF
+
+# ---------------------------------------------------------------------------
+# OpenDKIM
+# ---------------------------------------------------------------------------
+echo
+echo "OpenDKIM..."
+NEW_KEYS=""
+for d in $MAIL_DOMAINS; do
+  kdir="/etc/opendkim/keys/$d"
+  if [ ! -f "$kdir/$DKIM_SELECTOR.private" ]; then
+    install -d -m 750 -o opendkim -g opendkim "$kdir"
+    ms_run opendkim-genkey -b 2048 -h sha256 -r -s "$DKIM_SELECTOR" -d "$d" -D "$kdir"
+    chown opendkim:opendkim "$kdir/$DKIM_SELECTOR.private" "$kdir/$DKIM_SELECTOR.txt"
+    chmod 600 "$kdir/$DKIM_SELECTOR.private"
+    NEW_KEYS="$NEW_KEYS $d"
+  fi
+done
+
+{
+  for d in $MAIL_DOMAINS; do
+    echo "$DKIM_SELECTOR._domainkey.$d $d:$DKIM_SELECTOR:/etc/opendkim/keys/$d/$DKIM_SELECTOR.private"
+  done
+} | ms_put /etc/opendkim/KeyTable 644 && CHANGED_DKIM=true || true
+{
+  for d in $MAIL_DOMAINS; do echo "*@$d $DKIM_SELECTOR._domainkey.$d"; done
+} | ms_put /etc/opendkim/SigningTable 644 && CHANGED_DKIM=true || true
+{
+  echo "127.0.0.1"; echo "::1"
+  for n in $LAN_NETWORKS; do echo "$n"; done
+} | ms_put /etc/opendkim/TrustedHosts 644 && CHANGED_DKIM=true || true
+
+# 'MTA ORIGINATING' + milter_macro_daemon_name=ORIGINATING on the submission
+# services makes OpenDKIM sign mail from logged-in users wherever they are -
+# their real IPs (via PROXY) are not in TrustedHosts.
+ms_put /etc/opendkim.conf 644 <<EOF && CHANGED_DKIM=true || true
+# Managed by yamc: mailserver
+Syslog                  yes
+UMask                   007
+UserID                  opendkim
+PidFile                 /run/opendkim/opendkim.pid
+Socket                  inet:8891@127.0.0.1
+Mode                    sv
+Canonicalization        relaxed/simple
+OversignHeaders         From
+MTA                     ORIGINATING
+KeyTable                /etc/opendkim/KeyTable
+SigningTable            refile:/etc/opendkim/SigningTable
+InternalHosts           refile:/etc/opendkim/TrustedHosts
+ExternalIgnoreList      refile:/etc/opendkim/TrustedHosts
+EOF
+# Debian builds the unit's socket argument from /etc/default/opendkim, which
+# would override Socket above - keep the two in agreement.
+ms_put /etc/default/opendkim 644 <<EOF && CHANGED_DKIM=true || true
+# Managed by yamc: mailserver
+RUNDIR=/run/opendkim
+SOCKET=inet:8891@127.0.0.1
+USER=opendkim
+GROUP=opendkim
+PIDFILE=\$RUNDIR/\$NAME.pid
+EXTRAAFTER=
+EOF
+if [ "$CHANGED_DKIM" = true ] && [ -x /lib/opendkim/opendkim.service.generate ]; then
+  ms_run /lib/opendkim/opendkim.service.generate
+  ms_run systemctl daemon-reload
+fi
+
+# ---------------------------------------------------------------------------
+# Postfix
+# ---------------------------------------------------------------------------
+echo
+echo "Postfix..."
+[ -f /etc/postfix/main.cf ] || cp /usr/share/postfix/main.cf.debian /etc/postfix/main.cf
+PF_BEFORE=$( { postconf -n; postconf -M; postconf -P; } 2>/dev/null | sort )
+
+ms_put /etc/postfix/sasl/smtpd.conf 644 <<EOF && CHANGED_PF=true || true
+# Managed by yamc: mailserver - Postfix SMTP AUTH against sasldb
+pwcheck_method: auxprop
+auxprop_plugin: sasldb
+sasldb_path: /etc/sasldb2
+mech_list: PLAIN LOGIN
+EOF
+
+# Address table, and the list of local mailboxes (local_recipient_maps) so
+# unknown names are refused during the SMTP conversation.
+if ms_put /etc/postfix/virtual 644 < "$VIRTUAL_SRC" || [ ! -f /etc/postfix/virtual.db ]; then
+  ms_run postmap /etc/postfix/virtual; CHANGED_PF=true
+fi
+if for b in $MC_MAILBOXES; do echo "$b OK"; done | ms_put /etc/postfix/mailboxes 644 \
+   || [ ! -f /etc/postfix/mailboxes.db ]; then
+  ms_run postmap /etc/postfix/mailboxes; CHANGED_PF=true
+fi
+
+PF_MAIN=(
+  "compatibility_level=3.6"
+  "myhostname=$MAIL_HOSTNAME"
+  "myorigin=\$myhostname"
+  "mydestination=\$myhostname, localhost.localdomain, localhost, $(hostname)"
+  "mynetworks=127.0.0.0/8 $LAN_NETWORKS"
+  "inet_interfaces=all"
+  "inet_protocols=ipv4"
+  "relayhost=[$GATE_TUNNEL_ADDR]:25"
+  "virtual_alias_domains=$MAIL_DOMAINS"
+  "virtual_alias_maps=hash:/etc/postfix/virtual"
+  "local_transport=lmtp:unix:$LMTP_SOCK"
+  "local_recipient_maps=hash:/etc/postfix/mailboxes"
+  "alias_maps="
+  "alias_database="
+  "mailbox_size_limit=0"
+  "message_size_limit=$MESSAGE_SIZE_LIMIT"
+  "smtpd_banner=\$myhostname ESMTP"
+  "biff=no"
+  "append_dot_mydomain=no"
+  "disable_vrfy_command=yes"
+  "smtpd_helo_required=yes"
+  "smtpd_tls_cert_file=$MS_TLS/fullchain.pem"
+  "smtpd_tls_key_file=$MS_TLS/privkey.pem"
+  "smtpd_tls_security_level=may"
+  "smtpd_tls_auth_only=yes"
+  "smtp_tls_security_level=may"
+  "smtpd_sasl_type=cyrus"
+  "smtpd_sasl_path=smtpd"
+  "cyrus_sasl_config_path=/etc/postfix/sasl"
+  "smtpd_sasl_local_domain=$SASL_REALM"
+  "smtpd_sasl_auth_enable=no"
+  "smtpd_sasl_security_options=noanonymous"
+  "smtpd_relay_restrictions=permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination"
+  "smtpd_recipient_restrictions=reject_unlisted_recipient"
+  "milter_default_action=accept"
+  "smtpd_milters=inet:127.0.0.1:8891, unix:$SPAMASS_SOCK"
+  "non_smtpd_milters=inet:127.0.0.1:8891"
+)
+postconf -e "${PF_MAIN[@]}"
+
+# master.cf - every daemon unchrooted: the milter and LMTP sockets and
+# sasldb are given as absolute paths outside /var/spool/postfix.
+postconf -F "smtp/inet/chroot=n" "lmtp/unix/chroot=n"
+
+# Managed services are deleted and recreated each run, so a parameter removed
+# here does not linger. The before/after comparison decides whether anything
+# actually changed.
+for svc in submission/inet "$GW_MX/inet" "$GW_SUB/inet"; do
+  postconf -M "$svc" >/dev/null 2>&1 && postconf -MX "$svc"
+done
+
+# Values must not contain spaces (master.cf -o syntax): commas separate.
+postconf -M "submission/inet=submission inet n - n - - smtpd"
+postconf -P \
+  "submission/inet/syslog_name=postfix/submission" \
+  "submission/inet/smtpd_tls_security_level=encrypt" \
+  "submission/inet/smtpd_sasl_auth_enable=yes" \
+  "submission/inet/smtpd_relay_restrictions=permit_sasl_authenticated,reject" \
+  "submission/inet/smtpd_recipient_restrictions=permit_sasl_authenticated,reject" \
+  "submission/inet/milter_macro_daemon_name=ORIGINATING"
+
+# Public MX via the gateway. mynetworks is narrowed so LAN trust can never
+# apply here; PROXY supplies the real client address. Spamhaus answers are
+# filtered to real listings - a resolver that Spamhaus refuses gets
+# 127.255.255.x, which must not reject everything.
+postconf -M "$GW_MX/inet=$GW_MX inet n - n - - smtpd"
+postconf -P \
+  "$GW_MX/inet/syslog_name=postfix/gw-mx" \
+  "$GW_MX/inet/smtpd_upstream_proxy_protocol=haproxy" \
+  "$GW_MX/inet/mynetworks=127.0.0.1/32" \
+  "$GW_MX/inet/smtpd_sasl_auth_enable=no" \
+  "$GW_MX/inet/smtpd_relay_restrictions=reject_unauth_destination" \
+  "$GW_MX/inet/smtpd_recipient_restrictions=reject_unlisted_recipient,reject_rbl_client,zen.spamhaus.org=127.0.0.[2..11]"
+
+postconf -M "$GW_SUB/inet=$GW_SUB inet n - n - - smtpd"
+postconf -P \
+  "$GW_SUB/inet/syslog_name=postfix/gw-submission" \
+  "$GW_SUB/inet/smtpd_upstream_proxy_protocol=haproxy" \
+  "$GW_SUB/inet/mynetworks=127.0.0.1/32" \
+  "$GW_SUB/inet/smtpd_tls_security_level=encrypt" \
+  "$GW_SUB/inet/smtpd_sasl_auth_enable=yes" \
+  "$GW_SUB/inet/smtpd_relay_restrictions=permit_sasl_authenticated,reject" \
+  "$GW_SUB/inet/smtpd_recipient_restrictions=permit_sasl_authenticated,reject" \
+  "$GW_SUB/inet/milter_macro_daemon_name=ORIGINATING"
+
+PF_AFTER=$( { postconf -n; postconf -M; postconf -P; } 2>/dev/null | sort )
+[ "$PF_BEFORE" = "$PF_AFTER" ] || { CHANGED_PF=true; echo "    main.cf / master.cf updated"; }
+
+ms_run postfix check
+
+# ---------------------------------------------------------------------------
+# Start / restart what changed
+# ---------------------------------------------------------------------------
+echo
+echo "Services..."
+svc_apply() {   # svc_apply UNIT CHANGED [reload]
+  local unit="$1" changed="$2" how="${3:-restart}"
+  systemctl is-enabled --quiet "$unit" 2>/dev/null || ms_run systemctl enable "$unit"
+  if ! systemctl is-active --quiet "$unit"; then
+    ms_run systemctl start "$unit"
+  elif [ "$changed" = true ]; then
+    ms_run systemctl "$how" "$unit"
+  else
+    echo "    $unit: unchanged"
+  fi
+}
+svc_apply spamd          "$CHANGED_SA"
+svc_apply spamass-milter "$CHANGED_MILTER"
+svc_apply opendkim       "$CHANGED_DKIM"
+svc_apply cyrus-imapd    "$CHANGED_CY"
+svc_apply postfix        "$CHANGED_PF" reload
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+sleep 2
+echo
+echo "===================================================================="
+echo "Listening:"
+ss -ltnH 2>/dev/null | awk '{print $4}' \
+  | grep -E ':(25|587|993|10025|10587|10993|8891)$' | sort -u | sed 's/^/    /'
+for u in postfix cyrus-imapd opendkim spamd spamass-milter; do
+  printf '    %-16s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null)"
+done
+echo "===================================================================="
+
+# No real certificate yet: try now rather than wait for the timer, if the
+# tunnel is there. Harmless when the gateway is not ready (certpull says so).
+if ! grep -q '^source=gateway' "$MS_STATE_DIR/cert.state" 2>/dev/null \
+   && ip -4 addr show dev "$WG_IFACE" 2>/dev/null | grep -q "inet $WG_HUB_ADDR/"; then
+  echo
+  echo "Certificate: trying a pull from the gateway..."
+  timeout 60 "$MS_CERTPULL_BIN" 2>&1 | sed 's/^/    /' || true
+fi
+
+# ---------------------------------------------------------------------------
+# What is still outstanding. Each item is either a hand-off to the gateway or
+# an operation (DNS, passwords) that is not configuration.
+# ---------------------------------------------------------------------------
+TODO=()
+[ -n "$NEW_KEYS" ] && TODO+=("NEW DKIM keys for:$NEW_KEYS - publish before sending as them:  yamc -h $(hostname) mailserver dns")
+if ! grep -q '^source=gateway' "$MS_STATE_DIR/cert.state" 2>/dev/null; then
+  TODO+=("TLS is the self-signed placeholder. It is replaced automatically within the hour once the gateway has run (yamc -h <gateway> mailgate) with the cert-pull key this run records.")
+fi
+if ! wg show "$WG_IFACE" latest-handshakes 2>/dev/null | awk '$2 > 0 {f=1} END {exit !f}'; then
+  TODO+=("No WireGuard handshake on $WG_IFACE yet: outbound mail queues and nothing arrives from the internet. Gateway: wg-peer; then here: wg-hub (deploy the peer table).")
+fi
+SASL_USERS=$(sasldblistusers2 2>/dev/null | cut -d@ -f1 || true)
+NOPASS=""
+for b in $MC_MAILBOXES; do
+  grep -qx "$b" <<<"$SASL_USERS" || NOPASS="$NOPASS $b"
+done
+[ -n "$NOPASS" ] && TODO+=("No login password yet for:$NOPASS -  yamc -h $(hostname) mailserver user <mailbox>")
+
+echo
+if [ ${#TODO[@]} -eq 0 ]; then
+  echo "Nothing outstanding."
+else
+  echo "STILL TO DO:"
+  for t in "${TODO[@]}"; do echo "  - $t" | fold -s -w 76 | sed '2,$s/^/      /'; done
+fi

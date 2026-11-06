@@ -314,13 +314,10 @@ nft list table inet "$NFT_TABLE" 2>/dev/null | sed 's/^/  /' || echo "  (table n
 if [ "$BOOTSTRAP" = true ] || [ -z "${WG_HUB_PUBKEY:-}" ]; then
   echo
   echo "===================================================================="
-  echo "HUB PUBLIC KEY - peers need this."
+  echo "HUB PUBLIC KEY - peers need this:  $HUB_PUB"
   echo
-  echo "  Put it in yamc.local/wgnet/$WGNET_NAME.conf as:"
-  echo
-  echo "    WG_HUB_PUBKEY=\"$HUB_PUB\""
-  echo
-  echo "  Then configure a peer with:"
+  echo "  yamc records it in yamc.local/wgnet/$WGNET_NAME.conf when this run"
+  echo "  finishes. Then configure a peer with:"
   echo "    yamc -h <box> -e net=$WGNET_NAME -e addr=<tunnel-addr> wg-peer"
   echo "===================================================================="
 elif [ "$WG_HUB_PUBKEY" != "$HUB_PUB" ]; then

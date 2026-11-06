@@ -58,6 +58,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#variable-naming-conventions) for full conv
 module/
 ├── setup            # Remote script (required)
 ├── setup.loc        # Local prep (optional)
+├── setup.post.loc   # Local step after remote success, e.g. record a key (optional)
 ├── edit             # Subfunction (optional)
 ├── edit.loc         # Local edit (optional)
 └── README.md        # Documentation

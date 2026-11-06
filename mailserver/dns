@@ -1,0 +1,68 @@
+#!/bin/bash
+# mailserver/dns - print the DNS records every mail domain needs
+#
+# Usage: yamc -h uranus mailserver dns
+#
+# Read-only. Prints Namecheap-style rows (Type / Host / Value) per domain, and
+# checks what public DNS currently returns for each, so you can see what is
+# still to do. DKIM values come from the keys on this host.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+ms_banner dns
+ms_need_root
+
+[ -f "$MS_CONF" ] || ms_die "$MS_CONF not found - run 'mailserver' setup first"
+# shellcheck disable=SC1090
+. "$MS_CONF"
+
+pub() { dig +short "$1" "$2" @1.1.1.1 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
+
+# The gateway's address comes from yamc.local/mailgate/mailgate.conf. Without
+# that file, fall back to what public DNS says the mail name points at.
+if [ -z "${GATE_PUBLIC_IP:-}" ]; then
+  GATE_PUBLIC_IP=$(dig +short A "$MAIL_HOSTNAME" @1.1.1.1 2>/dev/null | head -1)
+  echo "NOTE: gateway address not configured here; using DNS: ${GATE_PUBLIC_IP:-none}"
+  [ -n "$GATE_PUBLIC_IP" ] || GATE_PUBLIC_IP="<gateway-public-ip>"
+fi
+
+SPF="v=spf1 ip4:$GATE_PUBLIC_IP"
+if [ "$OUTBOUND" = relay ] || [ -n "$RELAY_DOMAINS" ]; then
+  SPF="$SPF include:<your relay provider's SPF domain>"
+fi
+SPF="$SPF ~all"
+
+# For a domain, 'host' is relative to the zone Namecheap manages. A subdomain
+# such as test.batemans.org lives in the batemans.org zone with host 'test'.
+for d in $MAIL_DOMAINS; do
+  zone=$(echo "$d" | awk -F. '{print $(NF-1)"."$NF}')
+  if [ "$d" = "$zone" ]; then sub=""; at="@"; else sub="${d%."$zone"}"; at="$sub"; fi
+  sfx="${sub:+.$sub}"
+
+  dk=""
+  [ -f "/etc/opendkim/keys/$d/$DKIM_SELECTOR.txt" ] && \
+    dk=$(grep -o '"[^"]*"' "/etc/opendkim/keys/$d/$DKIM_SELECTOR.txt" | tr -d '"\n')
+
+  echo
+  echo "===================================================================="
+  echo "$d    (Namecheap: Domain List -> $zone -> Manage -> Advanced DNS)"
+  echo "===================================================================="
+  printf '  %-11s %-26s %s\n' "Type" "Host" "Value"
+  printf '  %-11s %-26s %s\n' "MX Record"  "$at" "$MAIL_HOSTNAME.   (priority 10)"
+  printf '  %-11s %-26s %s\n' "TXT Record" "$at" "$SPF"
+  printf '  %-11s %-26s %s\n' "TXT Record" "$DKIM_SELECTOR._domainkey$sfx" "${dk:-<no key yet - run setup>}"
+  printf '  %-11s %-26s %s\n' "TXT Record" "_dmarc$sfx" "v=DMARC1; p=none; rua=mailto:postmaster@$d"
+  echo
+  echo "  Public DNS now:"
+  echo "    MX     $(pub MX "$d")"
+  echo "    SPF    $(pub TXT "$d" | grep -o '"v=spf1[^"]*"' || true)"
+  echo "    DKIM   $( [ -n "$(pub TXT "$DKIM_SELECTOR._domainkey.$d")" ] && echo present || echo missing)"
+  echo "    DMARC  $(pub TXT "_dmarc.$d")"
+done
+
+echo
+echo "Notes:"
+echo "  - An apex domain's Mail Settings must be 'Custom MX' for MX rows to be allowed."
+echo "  - Use ~all while testing; change to -all once mail flows cleanly."
+echo "  - $MAIL_HOSTNAME must be an A record ($GATE_PUBLIC_IP), never a CNAME:"
+echo "    now: $(pub A "$MAIL_HOSTNAME")   (CNAME: $(pub CNAME "$MAIL_HOSTNAME" || true))"

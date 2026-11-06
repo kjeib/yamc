@@ -1,0 +1,29 @@
+#!/bin/bash
+# mailserver/cert - pull the TLS certificate from the gateway now
+#
+# Usage: yamc -h uranus mailserver cert
+#
+# Same as the timer, but always fetches (-f) and reports a failed fetch even
+# before the first real certificate. Installs only if the certificate
+# changed; records fingerprint and expiry in /var/lib/mailserver/cert.state.
+# Optional: the timer picks the certificate up by itself within the hour.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+ms_banner cert
+ms_need_root
+
+[ -x "$MS_CERTPULL_BIN" ] || ms_die "$MS_CERTPULL_BIN missing - run 'mailserver' setup first"
+"$MS_CERTPULL_BIN" -f
+rc=$?
+case "$rc" in
+  0) ;;
+  1) echo
+     echo "Fetch failed. Check, in order:"
+     echo "  - tunnel up:           ping $(. "$MS_CONF"; echo "$GATE_TUNNEL_ADDR")"
+     echo "  - key handed over:     yamc.local/mailserver/certpull.pub exists (recorded"
+     echo "                         by 'mailserver'), then mailgate re-run on the gateway"
+     echo "  - certificate issued:  yamc -h <gateway> mailgate status" ;;
+  2) echo; echo "Certificate installed but close to expiry - see warning above." ;;
+esac
+exit "$rc"

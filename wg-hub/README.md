@@ -256,18 +256,20 @@ policy would break every other forwarding path on the host.
 The hub generates its own keypair; the private half never leaves it. Peers need
 the public half, which lives in `<net>.conf` as `WG_HUB_PUBKEY`.
 
-```sh
-yamc -h uranus -e net=bkup wg-hub key             # print it
-yamc -h uranus -e net=bkup -e save=1 wg-hub key   # record it in <net>.conf
-```
-
-`-e save=1` is the only circumstance under which this module writes to
-`yamc.local` — that flag is the consent `AGENTS.md` requires. Without it the
-key is printed and nothing is written.
-
-It refuses to overwrite a **different** recorded key without `-e force=1`:
+**Recorded automatically.** After every successful `wg-hub` run, its
+`setup.post.loc` (run locally by yamc) writes the key into `<net>.conf` if
+none is recorded there yet. If a **different** key is recorded it only warns:
 every existing peer is built against the recorded key, so replacing it
 silently would break all of them at once.
+
+The `key` subcommand is the manual form, and the only one that can replace a
+recorded key:
+
+```sh
+yamc -h uranus -e net=bkup wg-hub key                        # print it
+yamc -h uranus -e net=bkup -e save=1 wg-hub key              # record it if missing
+yamc -h uranus -e net=bkup -e save=1 -e force=1 wg-hub key   # replace (hub rekeyed)
+```
 
 This subcommand exists because transcribing a 44-character base64 key by hand
 is a typo generator, and because reaching for `ssh` yourself leaves no trace in

@@ -9,13 +9,17 @@
 # only on this machine, so a remote script cannot write the peer table. The
 # private key never moves - only the public half is read.
 #
-# Writing to yamc.local happens ONLY with -e save=1.
+# Writing to yamc.local happens ONLY with -e save=1 - or with auto=1, which
+# setup.post.loc sets after every successful 'wg-peer' run. auto=1 records a
+# new peer line but never replaces an existing line for this name (that only
+# warns), and is silent when there is nothing to record.
 
 # shellcheck disable=SC1091
 source "$MOD_DIR/wgnet.loc.sh"
 
 wgnet_load "${net:-}" || exit 1
 net="$WGNET_NAME"
+[ "${auto:-0}" = "1" ] && save=1
 
 PEERS="$WGNET_DIR/$net.peers"
 NAME="${name:-${tgt_host%%.*}}"
@@ -26,6 +30,9 @@ read -r PUB ADDR < <(
      ip -4 -o addr show dev ${WG_IFACE} 2>/dev/null | awk '{print \$4}' | cut -d/ -f1" 2>/dev/null
 )
 
+if [ -z "$PUB" ] && [ "${auto:-0}" = "1" ]; then
+  exit 0      # report-only run, or setup stopped early: nothing to record
+fi
 if [ -z "$PUB" ]; then
   echo "ERROR: no public key at /etc/wireguard/${WG_IFACE}.pub on $tgt_host"
   echo "       Has the peer been set up?"
@@ -47,10 +54,12 @@ fi
 
 LINE=$(printf '%-10s | %-12s | %s |' "$NAME" "$ADDR" "$PUB")
 
-echo ""
-echo "Peer line for $net.peers:"
-echo ""
-echo "  $LINE"
+if [ "${auto:-0}" != "1" ]; then
+  echo ""
+  echo "Peer line for $net.peers:"
+  echo ""
+  echo "  $LINE"
+fi
 
 if [ "${save:-0}" != "1" ]; then
   echo ""
@@ -62,7 +71,7 @@ fi
 # Already present and identical?
 if grep -qF "$PUB" "$PEERS" 2>/dev/null; then
   echo ""
-  echo "$net.peers already records this key. Nothing to do."
+  echo "$net.peers already records this peer's key."
   exit 0
 fi
 
@@ -71,11 +80,14 @@ EXISTING=$(grep -E "^[[:space:]]*$NAME[[:space:]]*\|" "$PEERS" 2>/dev/null || tr
 if [ -n "$EXISTING" ]; then
   if [ "${force:-0}" != "1" ]; then
     echo ""
-    echo "ERROR: $net.peers already has a line for '$NAME' with a different key:"
+    [ "${auto:-0}" = "1" ] && echo -n "WARNING (not changed): " || echo -n "ERROR: "
+    echo "$net.peers already has a line for '$NAME' with a different key:"
     echo "  $EXISTING"
     echo ""
     echo "  That normally means the box was rebuilt and generated a new key."
-    echo "  Re-run with -e force=1 to replace the line."
+    echo "  To replace the line:"
+    echo "    yamc -h $tgt_host -e net=$net -e save=1 -e force=1 wg-peer key"
+    [ "${auto:-0}" = "1" ] && exit 0
     exit 1
   fi
   sed -i "\|^[[:space:]]*$NAME[[:space:]]*||d" "$PEERS"
@@ -86,7 +98,8 @@ fi
 printf '%s\n' "$LINE" >> "$PEERS"
 
 echo ""
-echo "Recorded in $PEERS"
+echo "Recorded this peer in $PEERS:"
+echo "  $LINE"
 echo ""
-echo "Now sync it onto the hub:"
-echo "  yamc -h <hub> -e net=$net -e yes=1 wg-hub"
+echo "The hub admits it once the peer table is deployed there:"
+echo "  yamc -h ${WG_HUB_HOST:-<hub>} -e net=$net -e yes=1 wg-hub"

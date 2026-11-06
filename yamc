@@ -335,7 +335,7 @@ list_subfunctions() {
     [ -f "$f" ] || continue
     name="$(basename "$f")"
     case "$name" in
-      *.md|*.env|README*|tmp-*|*.bak) continue ;;
+      *.md|*.env|README*|tmp-*|*.bak|*.post.loc) continue ;;
       *.conf|*.json|*.yaml|*.yml|*.list|*.ppd|*.txt) continue ;;
     esac
     if [[ "$name" == *.loc ]]; then
@@ -1166,6 +1166,36 @@ EOF
   if [ "$RESULT" -ne 0 ]; then
     log ERROR "Remote script execution failed (exit $RESULT)"
     exit "$RESULT"
+  fi
+
+  # Optional local step AFTER a successful remote run: <subfunc>.post.loc.
+  # For hand-offs that can only happen once the remote side has done its work,
+  # e.g. recording a public key the remote script just generated into
+  # yamc.local (which exists only on this machine). It sees the same variables
+  # as <subfunc>.loc, from the -e flags; values that .loc staged for the remote
+  # are not passed on, so a post script re-reads its config if it needs it.
+  if [ -f "$MOD_DIR/${SUBFUNC}.post.loc" ]; then
+    log INFO "Running local post script: ${SUBFUNC}.post.loc"
+    (
+      export MOD_DIR="$MOD_DIR"
+      export MOD_TMP="$MOD_TMP"
+      export ssh_user="$SSH_USER"
+      export tgt_host="$HOST"
+      export RES_DIR="$RES_DIR"
+      export RES_BASE="$RES_BASE"
+      export res_profile="$res_profile"
+      for var in "${ENV_VARS[@]}"; do
+        var_name="${var%%=*}"
+        var_value="${var#*=}"
+        export "$var_name"="$var_value"
+      done
+      source "$MOD_DIR/${SUBFUNC}.post.loc" "${MODULE_ARGS[@]}"
+    )
+    POST_STATUS=$?
+    if [ "$POST_STATUS" -ne 0 ]; then
+      log ERROR "Local post script failed with error code $POST_STATUS"
+      exit "$POST_STATUS"
+    fi
   fi
 
   log INFO "Module '$MODULE' completed successfully on '$HOST'"

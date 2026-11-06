@@ -39,11 +39,15 @@ show_usage() {
   cat <<EOF
 YAMCITY - YAMC Automation Wrapper
 
-Usage: yamcity -h hostname [-u username] [-v] profile_file [continue_on_error]
+Usage: yamcity -h hostname [-u username] [-e VAR=val]... [-v] profile_file [continue_on_error]
 
 Options:
   -h hostname       Optional if YAMC_HOST is set. Target remote hostname to use for all commands
   -u username       Optional. Default SSH username (can be overridden per-line)
+  -e VAR=val        Optional, repeatable. Passed to EVERY command, ahead of the line's
+                    own -e options (so a line can still override it). Typical use:
+                    -e yes=1 to apply modules that otherwise stop after their report
+                    (yamcity gives them no terminal to prompt on)
   -v                Optional. Enable verbose output
 
 Arguments:
@@ -193,8 +197,16 @@ process_profile() {
     
     # Check if first word is a file (profile to include)
     # Try both as-is and relative to current profile's directory
+    # A name that is a yamc module is always a module, even when a file of the
+    # same name sits next to the profile (a role profile is naturally named
+    # after its main module, e.g. profiles/mailserver runs 'mailserver').
     local include_path=""
-    if [ -f "$first_word" ]; then
+    local yamc_dir
+    yamc_dir="$(dirname "$YAMC_BIN")"
+    if [[ "$first_word" != */* ]] && [ -d "$yamc_dir/$first_word" ] \
+       && { [ -f "$yamc_dir/$first_word/setup" ] || [ -f "$yamc_dir/$first_word/setup.loc" ]; }; then
+      include_path=""
+    elif [ -f "$first_word" ]; then
       include_path="$first_word"
     elif [ -f "$profile_dir/$first_word" ]; then
       include_path="$profile_dir/$first_word"
@@ -231,6 +243,11 @@ process_profile() {
         full_command="$full_command -u $DEFAULT_USER"
       fi
       
+      # Global -e options first, so the line's own -e options win
+      if [ -n "$GLOBAL_ENV_OPTS" ]; then
+        full_command="$full_command$GLOBAL_ENV_OPTS"
+      fi
+
       # Add extracted options
       if [ -n "$EXTRACTED_OPTS" ]; then
         full_command="$full_command $EXTRACTED_OPTS"
@@ -290,10 +307,13 @@ process_profile() {
 HOST=""
 DEFAULT_USER=""
 VERBOSE=false
+GLOBAL_ENV_OPTS=""
 
-while getopts "h:u:v" opt; do
+while getopts "h:u:ve:" opt; do
   case $opt in
     h) HOST="$OPTARG" ;;
+    e) [[ "$OPTARG" == *=* ]] || { echo "Error: -e needs VAR=value, got '$OPTARG'"; exit 1; }
+       GLOBAL_ENV_OPTS="$GLOBAL_ENV_OPTS -e $OPTARG" ;;
     u) DEFAULT_USER="$OPTARG" ;;
     v) VERBOSE=true ;;
     *) show_usage ;;

@@ -13,18 +13,27 @@
 # generator, and because reaching for ssh yourself leaves no trace in the yamc
 # workflow. Writing to yamc.local happens ONLY with -e save=1 - that flag is
 # the consent AGENTS.md asks for.
+#
+# setup.post.loc sources this with auto=1 after every successful 'wg-hub'
+# run, so the key is recorded without a separate step. auto=1 implies save=1
+# but never overwrites a DIFFERENT recorded key (that only warns), and is
+# silent when there is nothing to record.
 
 # shellcheck disable=SC1091
 source "$MOD_DIR/wgnet.loc.sh"
 
 wgnet_load "${net:-}" || exit 1
 net="$WGNET_NAME"
+[ "${auto:-0}" = "1" ] && save=1
 
 CONF="$WGNET_DIR/$net.conf"
 
 PUB=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ssh_user@$tgt_host" \
         "cat /etc/wireguard/${WG_IFACE}.pub" 2>/dev/null)
 
+if [ -z "$PUB" ] && [ "${auto:-0}" = "1" ]; then
+  exit 0      # report-only run, or setup stopped early: nothing to record
+fi
 if [ -z "$PUB" ]; then
   echo "ERROR: no public key at /etc/wireguard/${WG_IFACE}.pub on $tgt_host"
   echo "       Has the hub been set up?  yamc -h $tgt_host -e net=$net wg-hub"
@@ -36,9 +45,11 @@ if ! [[ "$PUB" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
   exit 1
 fi
 
-echo ""
-echo "Hub public key ($tgt_host, interface $WG_IFACE):"
-echo "  $PUB"
+if [ "${auto:-0}" != "1" ]; then
+  echo ""
+  echo "Hub public key ($tgt_host, interface $WG_IFACE):"
+  echo "  $PUB"
+fi
 
 if [ "${save:-0}" != "1" ]; then
   echo ""
@@ -53,19 +64,22 @@ CURRENT=$(grep -E '^WG_HUB_PUBKEY=' "$CONF" | sed 's/^WG_HUB_PUBKEY="\(.*\)"$/\1
 
 if [ "$CURRENT" = "$PUB" ]; then
   echo ""
-  echo "$net.conf already records this key. Nothing to do."
+  echo "$net.conf already records this hub key."
   exit 0
 fi
 
 if [ -n "$CURRENT" ] && [ "${force:-0}" != "1" ]; then
   echo ""
-  echo "ERROR: $net.conf already records a DIFFERENT key:"
+  [ "${auto:-0}" = "1" ] && echo -n "WARNING (not changed): " || echo -n "ERROR: "
+  echo "$net.conf already records a DIFFERENT key:"
   echo "  recorded: $CURRENT"
   echo "  actual:   $PUB"
   echo ""
   echo "  Every existing peer is built against the recorded key, so replacing"
   echo "  it silently would break all of them at once. If the hub really was"
-  echo "  rekeyed, re-run with -e force=1 and then re-run wg-peer on every box."
+  echo "  rekeyed:  yamc -h $tgt_host -e net=$net -e save=1 -e force=1 wg-hub key"
+  echo "  and then re-run wg-peer on every box."
+  [ "${auto:-0}" = "1" ] && exit 0
   exit 1
 fi
 
@@ -76,5 +90,6 @@ else
 fi
 
 echo ""
-echo "Recorded in $CONF"
+echo "Recorded the hub public key in $CONF"
 grep -n '^WG_HUB_PUBKEY' "$CONF" | sed 's/^/  /'
+echo "Peers can now be configured:  yamc -h <peer> -e net=$net -e addr=<address> wg-peer"

@@ -1,0 +1,36 @@
+#!/bin/bash
+# mailgate/help.loc - site-aware usage (local only, read-only)
+
+cat <<'EOF'
+mailgate - the public front door for the site mail store
+
+Runs on the gateway with the static public IP (kjeib.com). Assumes a store
+built by the 'mailserver' module. Holds no mail and no passwords:
+  HAProxy   :25 :587 :993  ->  mail store over WireGuard (PROXY protocol for SMTP)
+  Postfix   outbound only, on the tunnel address, accepts only from the store
+  certbot   the mail TLS certificate (standalone on :80)
+  nftables  default-deny firewall: 22 25 80 587 993
+
+USAGE
+  yamc -h kjeib.com mailgate [-e yes=1]   report, then converge (idempotent)
+  yamc -h kjeib.com mailgate status       services, tunnel, cert, queue, bounces
+  yamc -h kjeib.com mailgate test         outbound 25, PTR, listeners, open-relay check
+
+  As a role, with the tunnel peer:  yamcity -h kjeib.com [-e yes=1] yamc.local/profiles/mailgate
+
+CONFIGURATION  (yamc.local/mailgate/)
+  mailgate.conf  public IP, HELO name, certificate names, outbound mode, limits
+  relay.secret   RELAY_USER / RELAY_PASS, only when relaying (never committed)
+  Also read: this host's line in yamc.local/wgnet/<MAIL_WGNET>.peers (its
+  tunnel address), and the store's yamc.local/mailserver/certpull.pub.
+
+PREREQUISITES
+  - The WireGuard peer has run on this host (it records the peers line)
+  - Ports 80/25/587/993 free; ufw disabled
+  - Every name in CERT_NAMES has an A record pointing at GATE_PUBLIC_IP
+
+Switching outbound to a relay: set OUTBOUND / RELAY_HOST / RELAY_DOMAINS in
+mailgate.conf, put RELAY_USER / RELAY_PASS in relay.secret, re-run mailgate.
+
+Build and deploy order (store + gateway): yamc.local/mailserver/README.md
+EOF

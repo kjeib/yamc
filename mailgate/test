@@ -1,0 +1,89 @@
+#!/bin/bash
+# mailgate/test - can this gateway send directly, and does it look right?
+#
+# Usage: yamc -h kjeib.com mailgate test
+#
+# Sends NO mail. Checks:
+#   - outbound port 25 reaches the big receivers (provider not blocking)
+#   - reverse DNS of the public IP matches GATE_HELO, and resolves back
+#   - GATE_HELO's SPF record allows the public IP
+#   - the public listeners answer, and the store is reachable through them
+#   - this host is not an open relay from the outside
+# For a real delivery test, send from the store:
+#   swaks --server localhost --to you@gmail.com --from you@<domain>
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+mg_banner test
+mg_need_root
+
+FAIL=0
+ok()   { printf '  %-52s ok\n' "$1"; }
+bad()  { printf '  %-52s FAIL  %s\n' "$1" "$2"; FAIL=1; }
+info() { printf '  %-52s %s\n' "$1" "$2"; }
+
+banner_of() {   # banner_of HOST PORT - first SMTP line, or empty
+  timeout 10 bash -c "exec 3<>/dev/tcp/$1/$2; read -r -t 8 l <&3; echo \"\$l\"" 2>/dev/null
+}
+
+echo
+echo "Outbound port 25:"
+for mx in gmail-smtp-in.l.google.com outlook-com.olc.protection.outlook.com mx-aol.mail.gm0.yahoodns.net; do
+  b=$(banner_of "$mx" 25)
+  case "$b" in 220*) ok "$mx" ;; *) bad "$mx" "${b:-no connection}" ;; esac
+done
+
+echo
+echo "Identity:"
+ptr=$(getent hosts "$GATE_PUBLIC_IP" | awk '{print $2}')
+[ "$ptr" = "$GATE_HELO" ] && ok "PTR $GATE_PUBLIC_IP -> $ptr" \
+  || bad "PTR $GATE_PUBLIC_IP -> ${ptr:-none}" "expected $GATE_HELO (DO sets it from the droplet name)"
+fwd=$(getent ahostsv4 "$GATE_HELO" | awk 'NR==1{print $1}')
+[ "$fwd" = "$GATE_PUBLIC_IP" ] && ok "A $GATE_HELO -> $fwd" || bad "A $GATE_HELO -> ${fwd:-none}" "expected $GATE_PUBLIC_IP"
+# Receivers check SPF for the HELO name too (and only it, for bounces, whose
+# envelope sender is empty). The HELO domain's SPF must therefore allow this IP.
+helo_spf=$(dig +short TXT "$GATE_HELO" @1.1.1.1 2>/dev/null | tr -d '"' | grep -i '^v=spf1' | head -1)
+case " $helo_spf " in
+  *" ip4:$GATE_PUBLIC_IP "*|*" ip4:$GATE_PUBLIC_IP/32 "*) ok "SPF $GATE_HELO allows $GATE_PUBLIC_IP" ;;
+  "  ") bad "SPF $GATE_HELO" "no SPF record; add: v=spf1 ip4:$GATE_PUBLIC_IP ~all" ;;
+  *)    bad "SPF $GATE_HELO" "lacks ip4:$GATE_PUBLIC_IP (has: $helo_spf)" ;;
+esac
+mx=$(getent ahostsv4 "$MAIL_HOSTNAME" | awk 'NR==1{print $1}')
+[ "$mx" = "$GATE_PUBLIC_IP" ] && ok "A $MAIL_HOSTNAME -> $mx" || bad "A $MAIL_HOSTNAME -> ${mx:-none}" "expected $GATE_PUBLIC_IP"
+
+echo
+echo "Public listeners (through HAProxy to the store):"
+for p in 25 587; do
+  b=$(banner_of "$GATE_PUBLIC_IP" "$p")
+  case "$b" in 220*) ok "$GATE_PUBLIC_IP:$p  ${b:0:40}" ;; *) bad "$GATE_PUBLIC_IP:$p" "${b:-no banner (store down or tunnel down?)}" ;; esac
+done
+if timeout 8 openssl s_client -connect "$GATE_PUBLIC_IP:993" -servername "$MAIL_HOSTNAME" \
+     -verify_hostname "$MAIL_HOSTNAME" -verify_return_error </dev/null >/dev/null 2>&1; then
+  ok "$GATE_PUBLIC_IP:993  TLS verifies as $MAIL_HOSTNAME"
+else
+  bad "$GATE_PUBLIC_IP:993" "no TLS, or certificate not valid for $MAIL_HOSTNAME yet"
+fi
+
+echo
+echo "Open relay (must be refused):"
+r=$(timeout 20 bash -c "
+  exec 3<>/dev/tcp/$GATE_PUBLIC_IP/25
+  read -r -t 8 l <&3
+  printf 'EHLO relaytest.invalid\r\n' >&3; while read -r -t 5 l <&3; do case \"\$l\" in 250\ *) break;; esac; done
+  printf 'MAIL FROM:<test@relaytest.invalid>\r\n' >&3; read -r -t 5 l <&3
+  printf 'RCPT TO:<relaytest@example.com>\r\n' >&3; read -r -t 5 l <&3; echo \"\$l\"
+  printf 'QUIT\r\n' >&3" 2>/dev/null)
+case "$r" in
+  5*|4*) ok "RCPT to example.com refused (${r:0:30})" ;;
+  2*)    bad "RCPT to example.com" "ACCEPTED - OPEN RELAY. Stop HAProxy now: systemctl stop haproxy" ;;
+  *)     info "RCPT to example.com" "inconclusive (${r:-no answer})" ;;
+esac
+if timeout 4 bash -c "</dev/tcp/$GATE_PUBLIC_IP/10025" 2>/dev/null; then
+  bad "store port 10025 on the public IP" "reachable - should not be"
+else
+  ok "store ports not exposed on the public IP"
+fi
+
+echo
+[ "$FAIL" -eq 0 ] && echo "All checks passed." || echo "Some checks FAILED - see above."
+exit "$FAIL"

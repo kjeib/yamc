@@ -1,0 +1,32 @@
+#!/bin/bash
+# mailserver/help.loc - site-aware usage (local only, read-only)
+
+cat <<'EOF'
+mailserver - the site mail store (Postfix + Cyrus IMAP + SpamAssassin + OpenDKIM)
+
+Runs on the LAN mail host (uranus). Assumes a gateway built by the 'mailgate'
+module (kjeib.com), linked by the WireGuard network named in mail.conf
+(MAIL_WGNET), of which this host is the hub.
+
+USAGE
+  yamc -h uranus mailserver [-e yes=1]     report, then converge (idempotent)
+  yamc -h uranus mailserver status         services, queue, cert expiry, DKIM, accounts
+  yamc -h uranus mailserver dns            DNS rows to publish, and what DNS has now
+  yamc -h uranus mailserver user [NAME]    list accounts / set NAME's password
+  yamc -h uranus -e delete=1 mailserver user NAME
+  yamc -h uranus mailserver cert           pull the TLS cert now (the timer does it anyway)
+  yamc -h uranus [-e save=1] mailserver key   show / record the cert-pull key (setup does it)
+
+  As a role, with the tunnel hub:  yamcity -h uranus [-e yes=1] yamc.local/profiles/mailserver
+
+CONFIGURATION  (yamc.local/mailserver/)
+  mail.conf      public name, domains, LAN, gateway tunnel address, DKIM, limits
+  aliases        address -> mailbox; anything not listed is refused
+  certpull.pub   recorded by every setup run; mailgate installs it on the gateway
+
+Each run ends with STILL TO DO: DKIM records to publish, missing passwords,
+tunnel not up, certificate not yet pulled. 'dns' and 'user' are operations,
+not configuration, so they stay separate commands.
+
+Build and deploy order (store + gateway): yamc.local/mailserver/README.md
+EOF

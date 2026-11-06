@@ -189,22 +189,13 @@ echo "===================================================================="
 
 if age=$(wg_handshake_age "$WG_IFACE" "$WG_HUB_PUBKEY" 2>/dev/null); then
   echo "Handshake with the hub: ${age}s ago - the tunnel is UP."
-  echo
-  echo "Next: yamc -h $(hostname) -e bk_users=<source-host> backup-box"
+  echo "Verify isolation:  yamc -h $(hostname) -e net=$WGNET_NAME wg-peer probe"
 else
-  echo "No handshake with the hub yet - EXPECTED if the hub does not have this"
-  echo "peer's public key. Add it and the tunnel will come up within ~25s:"
+  echo "No handshake with the hub yet - EXPECTED until the hub has this peer's"
+  echo "public key. yamc records this peer in yamc.local/wgnet/$WGNET_NAME.peers"
+  echo "when this run finishes; then deploy the peer table to the hub and the"
+  echo "tunnel comes up within ~25s:"
   echo
-  echo "  1. Add this line to yamc.local/wgnet/$WGNET_NAME.peers"
-  echo
-  echo "     $(hostname -s)  | $PEER_ADDR  | $PEER_PUB  |"
-  echo
-  echo "  2. Sync it onto the hub:"
-  echo "       yamc -h <hub> -e net=$WGNET_NAME -e yes=1 wg-hub"
-  echo
-  echo "  3. Check from here:"
-  echo "       yamc -h $(hostname) -e net=$WGNET_NAME wg-peer status"
-  echo
-  echo "  The peer table is not written automatically - yamc modules do not"
-  echo "  modify yamc.local (see AGENTS.md), so this handoff is deliberate."
+  echo "    yamc -h <hub> -e net=$WGNET_NAME -e yes=1 wg-hub"
+  echo "    yamc -h $(hostname) -e net=$WGNET_NAME wg-peer probe"
 fi

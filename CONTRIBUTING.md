@@ -18,6 +18,7 @@ This document contains additional information useful for developing and debuggin
    ├── README.md        # Module documentation
    ├── setup            # Main remote script (required)
    ├── setup.loc        # Local preparation script (optional)
+   ├── setup.post.loc   # Local step after a successful remote run (optional)
    └── [other files]    # Supporting scripts and templates
    ```
 

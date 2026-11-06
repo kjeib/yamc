@@ -81,7 +81,8 @@ When you run `yamc -h hostname module`:
 5. Variables `MOD_DIR` and `MOD_TMP` are created to reference paths for both machines
 6. The local module directory is shared with the remote machine using an SFTP server and SSHFS in slave mode
 7. The remote script is executed on the target machine, with access to local files
-8. After execution, the temporary resources are cleaned up
+8. If the remote script succeeded and a `setup.post.loc` exists, it's executed locally (see below)
+9. After execution, the temporary resources are cleaned up
 
 Note: `yamc init` is still the recommended onboarding step. However, if the host is already reachable via SSH and has `sshfs` installed, modules can run even if `~/.yamc/hostname.env` does not exist on the current local machine.
 
@@ -124,6 +125,7 @@ Modules are organized as directories containing:
 
 - `setup`: The main script executed on the remote machine (default)
 - `setup.loc`: Optional script executed locally before SSH connection
+- `setup.post.loc`: Optional script executed locally after the remote script succeeds
 - Any other files or subdirectories used by the scripts
 - Additional subfunction scripts with corresponding `.loc` files
 
@@ -132,6 +134,22 @@ When a subfunction is specified, YAMC will look for and execute scripts named af
 - `module/edit` on the remote machine
 
 Environment variables created in the `.loc` scripts will be available to the remote scripts.
+
+### Post-run hook (`<subfunc>.post.loc`)
+
+Some hand-offs can only happen after the remote side has done its work: a key
+the remote script just generated has to be recorded in `yamc.local`, which
+exists only on the local machine. If `<subfunc>.post.loc` exists and the remote
+script exited 0, yamc sources it locally with the same variables as the `.loc`
+script (`MOD_DIR`, `MOD_TMP`, `ssh_user`, `tgt_host`, `RES_DIR`, `RES_BASE`,
+`res_profile` and the `-e` flags). Values the `.loc` script staged for the
+remote are not passed on, so a post script re-reads its config if it needs it.
+A non-zero exit fails the yamc run. Post scripts are not listed as subcommands.
+
+Used by `wg-hub`, `wg-peer` and `mailserver` to record their public keys
+(`wgnet/<net>.conf`, `wgnet/<net>.peers`, `mailserver/certpull.pub`), so a
+machine can be configured by one run of each module instead of a run followed
+by a separate "save the key" step.
 
 ### Module Help (`help` / `help.loc`)
 
@@ -183,7 +201,8 @@ Planned modules:
 - `upgrade`: Upgrade all packages
 - `dhcp`: Configure the machine as a DHCP server
 - `bind9`: Configure the machine as a DNS server
-- `mailserver`: Set up a mail server
+- `mailserver`: Mail store - Postfix, Cyrus IMAP, SpamAssassin, OpenDKIM (written, not yet applied)
+- `mailgate`: Public mail gateway for `mailserver` - HAProxy, outbound Postfix, certbot, firewall (written, not yet applied)
 
 ## Installation
 
@@ -335,7 +354,16 @@ YAMC includes a companion script called `yamcity` that allows you to automate th
 
 # Continue execution after errors
 ./yamcity -h hostname profile_file true
+
+# Pass a variable to every command (ahead of each line's own -e options)
+./yamcity -h hostname -e yes=1 profile_file
 ```
+
+yamcity runs each command with no terminal. Modules that ask for confirmation
+(`wg-hub`, `wg-peer`, `mailserver`, `mailgate`, ...) therefore print their plan
+and stop; that makes a plain yamcity run a dry run. Add `-e yes=1` to apply.
+Add `true` (continue on error) to see every module's plan rather than only the
+first.
 
 ### Profile File Format
 
@@ -365,7 +393,7 @@ profiles/base
 - Module name is always the first word
 - Options (`-u`, `-p`, `-e`, `-v`, `-t`) can appear anywhere after the module
 - Options are automatically reordered before passing to yamc
-- If a line's first word is a file path, it's included as a nested profile
+- If a line's first word is a file path, it's included as a nested profile, unless it is also a yamc module name (a module always wins, so `profiles/mailserver` can run `mailserver`)
 - Circular includes are detected and prevented
 
 ### Profile Composition

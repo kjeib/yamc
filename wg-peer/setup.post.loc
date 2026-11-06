@@ -1,0 +1,7 @@
+#!/bin/bash
+# wg-peer/setup.post.loc - after a successful 'wg-peer' run, record this peer's
+# line in yamc.local/wgnet/<net>.peers (yamc runs this locally, after the
+# remote setup). Same logic as 'wg-peer key -e save=1', in its lenient mode.
+auto=1
+# shellcheck disable=SC1091
+source "$MOD_DIR/key.loc"

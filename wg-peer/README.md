@@ -77,14 +77,19 @@ hub, and a peer that could opt itself into more access would defeat the point.
 
 4. `systemctl enable --now wg-quick@<iface>`
 5. Install the **endpoint re-resolve timer** (see below).
-6. Print a ready-to-paste line for `yamc.local/wgnet/<net>.peers`:
+6. When the run succeeds, its `setup.post.loc` (run locally by yamc) appends
+   this peer's line to `yamc.local/wgnet/<net>.peers`:
 
    ```
-   orion  | 10.9.9.2  | <this box's public key>  | 
+   orion      | 10.9.9.2     | <this box's public key> |
    ```
 
-   The module does **not** write to `yamc.local/` itself (`AGENTS.md`), so
-   pasting that line is an explicit manual step by design.
+   The name is the short hostname (or `-e name=`). The hub admits the peer
+   once the table is deployed there:
+   `yamc -h <hub> -e net=<net> -e yes=1 wg-hub`.
+
+The tunnel address comes from `-e addr=` on the first run. After that it is
+read from the peer's line, so `-e addr` can be left off (or must agree).
 
 ### The two `/32`s
 
@@ -190,12 +195,12 @@ yamc -h orion -e net=bkup -e save=1 wg-peer key   # append it to <net>.peers
 ```
 
 The private key is generated on the box and never leaves it. Only the public
-half is read, and it is written to `yamc.local` **only** with `-e save=1` —
-that flag is the consent `AGENTS.md` requires.
+half is read. Every successful `wg-peer` run records it (see step 6); the
+`key` subcommand is the manual form.
 
 `-e force=1` replaces an existing line whose key has changed, which normally
-means the box was rebuilt. Without it, a mismatch is refused rather than
-silently overwritten.
+means the box was rebuilt. Without it, a mismatch is refused (by `key`) or
+only warned about (after setup) rather than silently overwritten.
 
 After saving, sync it onto the hub:
 

@@ -1,0 +1,44 @@
+#!/bin/bash
+# mailserver/user - set, reset or delete a mailbox login password (sasldb)
+#
+# Usage:
+#   yamc -h uranus mailserver user                 # list accounts
+#   yamc -h uranus mailserver user NAME            # set/reset (prompts twice)
+#   yamc -h uranus -e delete=1 mailserver user NAME
+#
+# The same password serves IMAP and SMTP submission. It is separate from any
+# login password (see pwsync). NAME is the mailbox name from 'aliases'.
+
+# shellcheck disable=SC1091
+source "$MOD_DIR/common.sh"
+ms_banner user
+ms_need_root
+
+[ -f "$MS_CONF" ] || ms_die "$MS_CONF not found - run 'mailserver' setup first"
+# shellcheck disable=SC1090
+. "$MS_CONF"
+
+name="${1:-}"
+if [ -z "$name" ]; then
+  echo "Accounts (realm $SASL_REALM):"
+  sasldblistusers2 2>/dev/null | sed 's/^/  /' || echo "  (none)"
+  echo
+  echo "Set one:  yamc -h $(hostname) mailserver user <mailbox>"
+  exit 0
+fi
+[[ "$name" =~ ^[a-z0-9._-]+$ ]] || ms_die "'$name' is not a valid mailbox name"
+
+if [ "${delete:-0}" = "1" ]; then
+  saslpasswd2 -d -u "$SASL_REALM" "$name" && echo "Deleted login for $name (mail already stored is kept)."
+  exit $?
+fi
+
+[ -t 0 ] || ms_die "needs a terminal to prompt for the password"
+grep -qw "$name" /etc/postfix/mailboxes 2>/dev/null \
+  || echo "NOTE: '$name' is not a mailbox in the aliases table - it can log in but receives nothing."
+
+# -c creates or replaces. The realm must match smtpd_sasl_local_domain
+# (Postfix) and Cyrus's server name, both set to this host's name by setup.
+saslpasswd2 -c -u "$SASL_REALM" "$name"
+chown root:sasl /etc/sasldb2; chmod 640 /etc/sasldb2
+echo "Password set for $name@$SASL_REALM."

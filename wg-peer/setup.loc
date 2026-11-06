@@ -25,10 +25,32 @@ if [ -n "$missing" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Tunnel address. No default: picking one automatically risks colliding with
-# an existing peer, and WireGuard does not error on overlapping AllowedIPs -
-# it silently reassigns the address and misroutes the loser.
+# Tunnel address. Taken from <net>.peers when this host is already listed
+# there (re-runs need no -e addr). Otherwise it must be given: picking one
+# automatically risks colliding with an existing peer, and WireGuard does not
+# error on overlapping AllowedIPs - it silently reassigns the address and
+# misroutes the loser.
+#
+# The peer's name in the table is the short hostname (or -e name=), the same
+# name 'wg-peer key' records.
 # ---------------------------------------------------------------------------
+PEER_NAME="${name:-${tgt_host%%.*}}"
+if [ -f "$WGNET_DIR/$net.peers" ]; then
+  while IFS='|' read -r n a key notes; do
+    n=$(wgnet_trim "$n"); a=$(wgnet_trim "$a")
+    [ "$n" = "$PEER_NAME" ] || continue
+    if [ -z "${addr:-}" ]; then
+      addr="$a"
+      echo "Address $addr for '$PEER_NAME' taken from $net.peers"
+    elif [ "$addr" != "$a" ]; then
+      echo "ERROR: -e addr=$addr, but $net.peers lists '$PEER_NAME' at $a."
+      echo "       Changing a peer's address: edit $net.peers, then re-run this"
+      echo "       and wg-hub."
+      exit 1
+    fi
+  done < "$WGNET_DIR/$net.peers"
+fi
+
 if [ -z "${addr:-}" ]; then
   echo ""
   echo "ERROR: no tunnel address given. Use -e addr=<address>."
@@ -56,7 +78,7 @@ if [ -f "$WGNET_DIR/$net.peers" ]; then
     name=$(wgnet_trim "$name"); a=$(wgnet_trim "$a")
     [ -z "$name" ] && continue
     case "$name" in \#*) continue ;; esac
-    if [ "$a" = "$addr" ] && [ "$name" != "$tgt_host" ]; then
+    if [ "$a" = "$addr" ] && [ "$name" != "$PEER_NAME" ]; then
       echo "ERROR: $addr is already assigned to peer '$name'."
       echo "       Two peers sharing an address misroute one of them silently."
       exit 1
